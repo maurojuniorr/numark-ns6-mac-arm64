@@ -23,8 +23,9 @@
 #define QUEUE_TARGET_FRAMES 4096
 #define CONTROL_SLOTS 16
 #define MAX_RATE_ADJUST_Q16 4096
-#define FEEDBACK_PACKETS 32
+#define FEEDBACK_PACKETS 16
 #define FEEDBACK_MAX_PACKET 64
+#define FEEDBACK_SLOT_COUNT 1
 
 struct slot { IOUSBLowLatencyIsocFrame *frames; unsigned char *data; };
 static IOUSBInterfaceInterface **interface;
@@ -33,7 +34,7 @@ static CFRunLoopSourceRef source;
 static CFRunLoopSourceRef auxiliary_source;
 static CFRunLoopRef run_loop;
 static struct slot slots[SLOT_COUNT];
-static struct slot feedback_slots[SLOT_COUNT];
+static struct slot feedback_slots[FEEDBACK_SLOT_COUNT];
 static pthread_t thread;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
@@ -185,6 +186,8 @@ static bool initialize(void){
     for(unsigned i=0;i<SLOT_COUNT;++i){
         result=(*interface)->LowLatencyCreateBuffer(interface,(void**)&slots[i].data,PACKETS*MAX_PACKET,kUSBLowLatencyWriteBuffer);if(result!=kIOReturnSuccess)return usb_failure("create audio buffer",result);
         result=(*interface)->LowLatencyCreateBuffer(interface,(void**)&slots[i].frames,sizeof(*slots[i].frames)*PACKETS,kUSBLowLatencyFrameListBuffer);if(result!=kIOReturnSuccess)return usb_failure("create frame list",result);
+    }
+    for(unsigned i=0;i<FEEDBACK_SLOT_COUNT;++i){
         result=(*auxiliary_interface)->LowLatencyCreateBuffer(auxiliary_interface,(void**)&feedback_slots[i].data,FEEDBACK_PACKETS*FEEDBACK_MAX_PACKET,kUSBLowLatencyReadBuffer);if(result!=kIOReturnSuccess)return usb_failure("create feedback buffer",result);
         result=(*auxiliary_interface)->LowLatencyCreateBuffer(auxiliary_interface,(void**)&feedback_slots[i].frames,sizeof(*feedback_slots[i].frames)*FEEDBACK_PACKETS,kUSBLowLatencyFrameListBuffer);if(result!=kIOReturnSuccess)return usb_failure("create feedback frame list",result);
     }
@@ -193,7 +196,7 @@ static bool initialize(void){
 static void cleanup(void){
     if(interface)(*interface)->AbortPipe(interface,1); if(auxiliary_interface&&feedback_pipe)(*auxiliary_interface)->AbortPipe(auxiliary_interface,feedback_pipe); if(run_loop)CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.2,false);
     if(interface)for(unsigned i=0;i<SLOT_COUNT;++i){if(slots[i].data)(*interface)->LowLatencyDestroyBuffer(interface,slots[i].data);if(slots[i].frames)(*interface)->LowLatencyDestroyBuffer(interface,slots[i].frames);} memset(slots,0,sizeof(slots));
-    if(auxiliary_interface)for(unsigned i=0;i<SLOT_COUNT;++i){if(feedback_slots[i].data)(*auxiliary_interface)->LowLatencyDestroyBuffer(auxiliary_interface,feedback_slots[i].data);if(feedback_slots[i].frames)(*auxiliary_interface)->LowLatencyDestroyBuffer(auxiliary_interface,feedback_slots[i].frames);} memset(feedback_slots,0,sizeof(feedback_slots));
+    if(auxiliary_interface)for(unsigned i=0;i<FEEDBACK_SLOT_COUNT;++i){if(feedback_slots[i].data)(*auxiliary_interface)->LowLatencyDestroyBuffer(auxiliary_interface,feedback_slots[i].data);if(feedback_slots[i].frames)(*auxiliary_interface)->LowLatencyDestroyBuffer(auxiliary_interface,feedback_slots[i].frames);} memset(feedback_slots,0,sizeof(feedback_slots));
     if(run_loop&&source)CFRunLoopRemoveSource(run_loop,source,kCFRunLoopDefaultMode); if(source)CFRelease(source); source=NULL;
     if(run_loop&&auxiliary_source)CFRunLoopRemoveSource(run_loop,auxiliary_source,kCFRunLoopDefaultMode); if(auxiliary_source)CFRelease(auxiliary_source); auxiliary_source=NULL;
     if(run_loop)CFRelease(run_loop); run_loop=NULL;
@@ -207,7 +210,8 @@ static void *worker(void *unused){
     if(ready){
         const struct timespec millisecond={0,1000000};
         for(unsigned waited=0;waited<STARTUP_WAIT_MS&&atomic_load_explicit(&running,memory_order_acquire)&&ns6_transport_available()<STARTUP_FRAMES;++waited)nanosleep(&millisecond,NULL);
-        for(unsigned i=0;i<SLOT_COUNT;++i){submit(&slots[i]);submit_feedback(&feedback_slots[i]);}
+        for(unsigned i=0;i<SLOT_COUNT;++i)submit(&slots[i]);
+        for(unsigned i=0;i<FEEDBACK_SLOT_COUNT;++i)submit_feedback(&feedback_slots[i]);
         while(atomic_load_explicit(&running,memory_order_acquire))CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.1,false);
     } cleanup(); return NULL;
 }
