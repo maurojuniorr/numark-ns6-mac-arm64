@@ -43,11 +43,18 @@ The expected NS6 descriptor layout is:
 | --- | --- | --- | --- |
 | 0 | 1 | `0x02` | ISO OUT, four-channel S24_3LE playback |
 | 0 | 1 | `0x83` / `0x04` | Bulk MIDI input / output |
-| 1 | 1 | `0x81` | ISO IN feedback, currently known to be unreliable |
+| 1 | 1 | `0x81` | ISO IN hardware clock feedback; experimental observer enabled on `codex/feedback-clock-experiment` |
 | 1 | 1 | `0x86` | Bulk waveform input, drained continuously |
 
 ## Clock work
 
-The next transport milestone starts silence URBs, records actual completion
-cadence and buffer occupancy, and writes a timestamped CSV trace. That gives
-us a measured device rate before implementing the adaptive resampler.
+The production transport uses whole-frame packets with a fractional
+accumulator: five-frame (60-byte) and six-frame (72-byte) USB microframes
+average exactly 44,100 frames per second. It never emits the invalid fixed
+66-byte packet shape.
+
+The experimental feedback branch reads `0x81` alongside playback and records
+the three-byte feedback packets reported by the NS6. On this hardware the
+first byte was observed at `44` and `45`, confirming that the endpoint carries
+clock-related data. The capture is diagnostic only until longer recordings
+establish how the values should drive rate correction.

@@ -23,13 +23,17 @@
 #define QUEUE_TARGET_FRAMES 4096
 #define CONTROL_SLOTS 16
 #define MAX_RATE_ADJUST_Q16 4096
+#define FEEDBACK_PACKETS 32
+#define FEEDBACK_MAX_PACKET 64
 
 struct slot { IOUSBLowLatencyIsocFrame *frames; unsigned char *data; };
 static IOUSBInterfaceInterface **interface;
 static IOUSBInterfaceInterface **auxiliary_interface;
 static CFRunLoopSourceRef source;
+static CFRunLoopSourceRef auxiliary_source;
 static CFRunLoopRef run_loop;
 static struct slot slots[SLOT_COUNT];
+static struct slot feedback_slots[SLOT_COUNT];
 static pthread_t thread;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
@@ -38,6 +42,8 @@ static bool thread_created, initialized;
 static uint64_t fraction;
 static int32_t rate_adjust_q16;
 static unsigned control_slots;
+static UInt8 feedback_pipe;
+static uint64_t feedback_packets,feedback_bytes,feedback_frame_sum,feedback_values[256],feedback_errors;
 
 static int property_u16(io_registry_entry_t entry, CFStringRef key, UInt16 *out) {
     CFTypeRef value=IORegistryEntryCreateCFProperty(entry,key,kCFAllocatorDefault,0);
@@ -102,6 +108,15 @@ static IOReturn activate_controller(void){
     }
     return kIOReturnNotFound;
 }
+static UInt8 find_iso_input_pipe(void){
+    UInt8 endpoints=0;
+    if((*auxiliary_interface)->GetNumEndpoints(auxiliary_interface,&endpoints)!=kIOReturnSuccess)return 0;
+    for(UInt8 pipe=1;pipe<=endpoints;++pipe){
+        UInt8 direction=0,number=0,type=0,interval=0; UInt16 maximum=0;
+        if((*auxiliary_interface)->GetPipeProperties(auxiliary_interface,pipe,&direction,&number,&type,&maximum,&interval)==kIOReturnSuccess&&direction==kUSBIn&&number==1&&type==kUSBIsoc)return pipe;
+    }
+    return 0;
+}
 static bool usb_failure(const char *operation,IOReturn result){fprintf(stderr,"Numark NS6 %s failed: 0x%08x\n",operation,result);return false;}
 static IOReturn control(UInt8 type,UInt8 request,UInt16 value,UInt16 index,void *data,UInt16 length){
     IOUSBDevRequest r={type,request,value,index,length,data,0}; return (*interface)->ControlRequest(interface,0,&r);
@@ -130,14 +145,34 @@ static void submit(struct slot *slot){
     fill(slot); IOReturn result=(*interface)->LowLatencyWriteIsochPipeAsync(interface,1,slot->data,0,PACKETS,1,slot->frames,complete,slot);
     if(result!=kIOReturnSuccess)atomic_store_explicit(&running,false,memory_order_release);
 }
+static void submit_feedback(struct slot *slot);
+static void feedback_complete(void *reference,IOReturn status,void *argument){
+    (void)argument;
+    struct slot *slot=reference;
+    if(status!=kIOReturnSuccess){if(atomic_load_explicit(&running,memory_order_acquire))++feedback_errors;return;}
+    unsigned char *data=slot->data;
+    for(unsigned packet=0;packet<FEEDBACK_PACKETS;++packet){
+        UInt16 actual=slot->frames[packet].frActCount;
+        if(actual>=3){++feedback_packets;feedback_bytes+=actual;feedback_frame_sum+=data[0];++feedback_values[data[0]];}
+        data+=slot->frames[packet].frReqCount;
+    }
+    if(atomic_load_explicit(&running,memory_order_acquire))submit_feedback(slot);
+}
+static void submit_feedback(struct slot *slot){
+    for(unsigned packet=0;packet<FEEDBACK_PACKETS;++packet){slot->frames[packet].frReqCount=FEEDBACK_MAX_PACKET;slot->frames[packet].frActCount=0;slot->frames[packet].frStatus=0;}
+    if((*auxiliary_interface)->LowLatencyReadIsochPipeAsync(auxiliary_interface,feedback_pipe,slot->data,0,FEEDBACK_PACKETS,1,slot->frames,feedback_complete,slot)!=kIOReturnSuccess)++feedback_errors;
+}
 static bool initialize(void){
     unsigned char capability[64]={0},rate[3]={0x44,0xac,0}; interface=open_interface(); if(!interface)return false;
     IOReturn result=(*interface)->USBInterfaceOpenSeize(interface); if(result!=kIOReturnSuccess)return usb_failure("open interface",result);
     auxiliary_interface=open_interface_once(1); if(!auxiliary_interface)return false;
     result=(*auxiliary_interface)->USBInterfaceOpenSeize(auxiliary_interface); if(result!=kIOReturnSuccess)return usb_failure("open auxiliary interface",result);
     result=(*auxiliary_interface)->SetAlternateInterface(auxiliary_interface,1); if(result!=kIOReturnSuccess)return usb_failure("select auxiliary alternate setting",result);
+    feedback_pipe=find_iso_input_pipe(); if(!feedback_pipe)return usb_failure("find feedback endpoint",kIOReturnNotFound);
     result=(*interface)->CreateInterfaceAsyncEventSource(interface,&source); if(result!=kIOReturnSuccess||!source)return usb_failure("create async source",result);
     run_loop=CFRunLoopGetCurrent(); CFRetain(run_loop); CFRunLoopAddSource(run_loop,source,kCFRunLoopDefaultMode);
+    result=(*auxiliary_interface)->CreateInterfaceAsyncEventSource(auxiliary_interface,&auxiliary_source); if(result!=kIOReturnSuccess||!auxiliary_source)return usb_failure("create feedback async source",result);
+    CFRunLoopAddSource(run_loop,auxiliary_source,kCFRunLoopDefaultMode);
     result=(*interface)->SetAlternateInterface(interface,1); if(result!=kIOReturnSuccess)return usb_failure("select alternate setting",result);
     result=control(0xc0,86,0,0,capability,8); if(result!=kIOReturnSuccess)return usb_failure("read capability",result);
     UInt16 capability_length=capability[0]<sizeof(capability)?capability[0]:(UInt16)sizeof(capability);
@@ -146,17 +181,24 @@ static bool initialize(void){
     result=control(0x22,1,0x0100,2,rate,sizeof(rate));if(result!=kIOReturnSuccess)return usb_failure("set clock selector 2",result);
     result=control(0x40,73,0x0032,0,NULL,0);if(result!=kIOReturnSuccess)return usb_failure("start audio engine",result);
     result=activate_controller();if(result!=kIOReturnSuccess)return usb_failure("activate controller",result);
+    feedback_packets=0; feedback_bytes=0; feedback_frame_sum=0; feedback_errors=0; memset(feedback_values,0,sizeof(feedback_values));
     for(unsigned i=0;i<SLOT_COUNT;++i){
         result=(*interface)->LowLatencyCreateBuffer(interface,(void**)&slots[i].data,PACKETS*MAX_PACKET,kUSBLowLatencyWriteBuffer);if(result!=kIOReturnSuccess)return usb_failure("create audio buffer",result);
         result=(*interface)->LowLatencyCreateBuffer(interface,(void**)&slots[i].frames,sizeof(*slots[i].frames)*PACKETS,kUSBLowLatencyFrameListBuffer);if(result!=kIOReturnSuccess)return usb_failure("create frame list",result);
+        result=(*auxiliary_interface)->LowLatencyCreateBuffer(auxiliary_interface,(void**)&feedback_slots[i].data,FEEDBACK_PACKETS*FEEDBACK_MAX_PACKET,kUSBLowLatencyReadBuffer);if(result!=kIOReturnSuccess)return usb_failure("create feedback buffer",result);
+        result=(*auxiliary_interface)->LowLatencyCreateBuffer(auxiliary_interface,(void**)&feedback_slots[i].frames,sizeof(*feedback_slots[i].frames)*FEEDBACK_PACKETS,kUSBLowLatencyFrameListBuffer);if(result!=kIOReturnSuccess)return usb_failure("create feedback frame list",result);
     }
     return true;
 }
 static void cleanup(void){
-    if(interface)(*interface)->AbortPipe(interface,1); if(run_loop)CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.2,false);
+    if(interface)(*interface)->AbortPipe(interface,1); if(auxiliary_interface&&feedback_pipe)(*auxiliary_interface)->AbortPipe(auxiliary_interface,feedback_pipe); if(run_loop)CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.2,false);
     if(interface)for(unsigned i=0;i<SLOT_COUNT;++i){if(slots[i].data)(*interface)->LowLatencyDestroyBuffer(interface,slots[i].data);if(slots[i].frames)(*interface)->LowLatencyDestroyBuffer(interface,slots[i].frames);} memset(slots,0,sizeof(slots));
+    if(auxiliary_interface)for(unsigned i=0;i<SLOT_COUNT;++i){if(feedback_slots[i].data)(*auxiliary_interface)->LowLatencyDestroyBuffer(auxiliary_interface,feedback_slots[i].data);if(feedback_slots[i].frames)(*auxiliary_interface)->LowLatencyDestroyBuffer(auxiliary_interface,feedback_slots[i].frames);} memset(feedback_slots,0,sizeof(feedback_slots));
     if(run_loop&&source)CFRunLoopRemoveSource(run_loop,source,kCFRunLoopDefaultMode); if(source)CFRelease(source); source=NULL;
+    if(run_loop&&auxiliary_source)CFRunLoopRemoveSource(run_loop,auxiliary_source,kCFRunLoopDefaultMode); if(auxiliary_source)CFRelease(auxiliary_source); auxiliary_source=NULL;
     if(run_loop)CFRelease(run_loop); run_loop=NULL;
+    if(feedback_packets)fprintf(stderr,"Numark NS6 feedback: packets=%llu bytes=%llu mean=%.6f values[44]=%llu values[45]=%llu values[5]=%llu values[6]=%llu errors=%llu\n",(unsigned long long)feedback_packets,(unsigned long long)feedback_bytes,(double)feedback_frame_sum/feedback_packets,(unsigned long long)feedback_values[44],(unsigned long long)feedback_values[45],(unsigned long long)feedback_values[5],(unsigned long long)feedback_values[6],(unsigned long long)feedback_errors);
+    feedback_pipe=0;
     if(auxiliary_interface){(*auxiliary_interface)->USBInterfaceClose(auxiliary_interface);(*auxiliary_interface)->Release(auxiliary_interface);} auxiliary_interface=NULL;
     if(interface){(*interface)->USBInterfaceClose(interface);(*interface)->Release(interface);} interface=NULL;
 }
@@ -165,7 +207,7 @@ static void *worker(void *unused){
     if(ready){
         const struct timespec millisecond={0,1000000};
         for(unsigned waited=0;waited<STARTUP_WAIT_MS&&atomic_load_explicit(&running,memory_order_acquire)&&ns6_transport_available()<STARTUP_FRAMES;++waited)nanosleep(&millisecond,NULL);
-        for(unsigned i=0;i<SLOT_COUNT;++i)submit(&slots[i]);
+        for(unsigned i=0;i<SLOT_COUNT;++i){submit(&slots[i]);submit_feedback(&feedback_slots[i]);}
         while(atomic_load_explicit(&running,memory_order_acquire))CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.1,false);
     } cleanup(); return NULL;
 }
