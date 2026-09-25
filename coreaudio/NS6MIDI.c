@@ -1,6 +1,7 @@
 #include "NS6MIDI.h"
 #include <arpa/inet.h>
 #include <pthread.h>
+#include <os/log.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -47,7 +48,7 @@ static void publish_packet(const unsigned char *data,UInt32 length){for(UInt32 o
 static void submit_read(struct read_slot *slot);
 static void read_complete(void *reference,IOReturn status,void *argument){struct read_slot *slot=reference;if(status==kIOReturnSuccess){UInt32 length=(UInt32)(uintptr_t)argument;if(length>MIDI_PACKET_BYTES)length=MIDI_PACKET_BYTES;publish_packet(slot->data,length);}if(atomic_load(&running))submit_read(slot);}
 static void submit_read(struct read_slot *slot){if((*usb)->ReadPipeAsync(usb,input_pipe,slot->data,sizeof(slot->data),read_complete,slot)!=kIOReturnSuccess&&atomic_load(&running))fprintf(stderr,"Numark NS6 MIDI input unavailable\n");}
-static void *write_worker(void *unused){(void)unused;for(;;){struct write_packet packet;pthread_mutex_lock(&queue_lock);while(head==tail&&atomic_load(&running))pthread_cond_wait(&queue_ready,&queue_lock);if(head==tail&&!atomic_load(&running)){pthread_mutex_unlock(&queue_lock);break;}packet=queue[head];head=(head+1)%MIDI_WRITE_QUEUE;pthread_mutex_unlock(&queue_lock);(*usb)->WritePipe(usb,output_pipe,packet.data,sizeof(packet.data));}return NULL;}
+static void *write_worker(void *unused){(void)unused;for(;;){struct write_packet packet;pthread_mutex_lock(&queue_lock);while(head==tail&&atomic_load(&running))pthread_cond_wait(&queue_ready,&queue_lock);if(head==tail&&!atomic_load(&running)){pthread_mutex_unlock(&queue_lock);break;}packet=queue[head];head=(head+1)%MIDI_WRITE_QUEUE;pthread_mutex_unlock(&queue_lock);IOReturn result=(*usb)->WritePipe(usb,output_pipe,packet.data,sizeof(packet.data));if(result!=kIOReturnSuccess)os_log_error(OS_LOG_DEFAULT,"Numark NS6 MIDI output failed: %{public}u",(unsigned)result);}return NULL;}
 static void *receive_worker(void *unused){(void)unused;unsigned char data[41];while(atomic_load(&running)){ssize_t length=recv(inbound_socket,data,sizeof(data),0);if(length>0)enqueue(data,(unsigned)length);}return NULL;}
 static bool open_sockets(void){
     inbound_socket=socket(AF_INET,SOCK_DGRAM,0);outbound_socket=socket(AF_INET,SOCK_DGRAM,0);if(inbound_socket<0||outbound_socket<0)return false;

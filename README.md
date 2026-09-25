@@ -14,18 +14,18 @@ The HAL owns the USB session and sends MIDI over a local loopback socket to
 the companion **Numark NS6 MIDI Bridge**. The bridge runs in the logged-in
 user session and publishes two CoreMIDI endpoints:
 
-- **Numark NS6 Controls** receives the controller's packed 42-byte USB MIDI
+- **Numark NS6** input receives the controller's packed 42-byte USB MIDI
   messages through endpoint `0x83`.
-- **Numark NS6 LEDs** accepts Note/CC messages from DJ software and sends them
-  to endpoint `0x04` for the controller LEDs.
+- **Numark NS6** output accepts Note/CC messages from DJ software and sends
+  them to endpoint `0x04` for the controller LEDs.
 
 Only the HAL claims the NS6 USB interface; the bridge never opens it. This
 keeps MIDI and audio in one USB session while ensuring the endpoints are
 visible to Mixxx and other desktop applications.
 
 The installer registers the bridge as a LaunchAgent, so it starts with macOS.
-After installing, select **Numark NS6 Controls** as the controller input and
-**Numark NS6 LEDs** as the controller output in Mixxx.
+After installing, select **Numark NS6** in Mixxx. Its input and output ports
+share that name so Mixxx pairs them automatically.
 
 ## Hardware probe
 

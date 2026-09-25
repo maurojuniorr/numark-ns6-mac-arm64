@@ -55,7 +55,7 @@ static bool open_socket(void){
 int main(void){
     MIDIClientRef client=0;MIDIEndpointRef source=0,destination=0;
     signal(SIGINT,stop);signal(SIGTERM,stop);
-    if(!open_socket()||MIDIClientCreate(CFSTR("Numark NS6 MIDI Bridge"),NULL,NULL,&client)!=noErr||MIDISourceCreate(client,CFSTR("Numark NS6 Controls"),&source)!=noErr||MIDIDestinationCreate(client,CFSTR("Numark NS6 LEDs"),receive_from_application,NULL,&destination)!=noErr){fprintf(stderr,"Could not start Numark NS6 MIDI Bridge\n");if(destination)MIDIEndpointDispose(destination);if(source)MIDIEndpointDispose(source);if(client)MIDIClientDispose(client);if(socket_fd>=0)close(socket_fd);return 1;}
+    if(!open_socket()||MIDIClientCreate(CFSTR("Numark NS6 MIDI Bridge"),NULL,NULL,&client)!=noErr||MIDISourceCreate(client,CFSTR("Numark NS6"),&source)!=noErr||MIDIDestinationCreate(client,CFSTR("Numark NS6"),receive_from_application,NULL,&destination)!=noErr){fprintf(stderr,"Could not start Numark NS6 MIDI Bridge\n");if(destination)MIDIEndpointDispose(destination);if(source)MIDIEndpointDispose(source);if(client)MIDIClientDispose(client);if(socket_fd>=0)close(socket_fd);return 1;}
     fprintf(stderr,"Numark NS6 MIDI Bridge ready\n");
     while(running){
         unsigned char data[64];ssize_t length=recv(socket_fd,data,sizeof(data),0);
