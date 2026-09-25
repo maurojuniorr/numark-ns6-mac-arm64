@@ -151,7 +151,6 @@ static bool initialize(void){
         result=(*interface)->LowLatencyCreateBuffer(interface,(void**)&slots[i].data,PACKETS*MAX_PACKET,kUSBLowLatencyWriteBuffer);if(result!=kIOReturnSuccess)return usb_failure("create audio buffer",result);
         result=(*interface)->LowLatencyCreateBuffer(interface,(void**)&slots[i].frames,sizeof(*slots[i].frames)*PACKETS,kUSBLowLatencyFrameListBuffer);if(result!=kIOReturnSuccess)return usb_failure("create frame list",result);
     }
-    if(!ns6_midi_start(interface,run_loop))fprintf(stderr,"Numark NS6 MIDI unavailable; continuing with audio only\n");
     return true;
 }
 static void cleanup(void){
@@ -169,6 +168,7 @@ static void *worker(void *unused){
         const struct timespec millisecond={0,1000000};
         for(unsigned waited=0;waited<STARTUP_WAIT_MS&&atomic_load_explicit(&running,memory_order_acquire)&&ns6_transport_available()<STARTUP_FRAMES;++waited)nanosleep(&millisecond,NULL);
         for(unsigned i=0;i<SLOT_COUNT;++i)submit(&slots[i]);
+        if(!ns6_midi_start(interface,run_loop))fprintf(stderr,"Numark NS6 MIDI unavailable; continuing with audio only\n");
         while(atomic_load_explicit(&running,memory_order_acquire))CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.1,false);
     } cleanup(); return NULL;
 }

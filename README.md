@@ -2,20 +2,24 @@
 
 Created and maintained by **Mauro Junior** ([maurojuniorr](https://github.com/maurojuniorr)).
 
-This directory is the arm64 macOS implementation. The original Numark HAL
-bundles installed on some Macs are Intel-only and cannot load on Apple Silicon.
+This is the arm64 macOS implementation. The original Numark HAL bundles
+installed on some Macs are Intel-only and cannot load on Apple Silicon.
 
-The implementation is split into two processes:
+The Core Audio HAL owns the NS6 USB interfaces, runs the vendor initialization
+sequence, and publishes four playback channels at 44.1 kHz S24_3LE.
 
-- `ns6d`: a privileged USB transport process using libusb. It owns the NS6
-  interfaces, runs the vendor initialization sequence, streams ISO audio, and
-  exposes clock telemetry.
-- a future Core Audio Audio Server Plug-in: it publishes the four-channel,
-  44.1 kHz S24_3LE playback device to Core Audio and exchanges audio buffers
-  with `ns6d` through a local IPC channel.
+## MIDI
 
-The split keeps USB I/O outside `coreaudiod`, which is sandboxed and must not
-perform blocking work on the real-time audio thread.
+When an app starts playback, the HAL also publishes two CoreMIDI endpoints:
+
+- **Numark NS6 Controls** receives the controller's packed 42-byte USB MIDI
+  messages through endpoint `0x83`.
+- **Numark NS6 LEDs** accepts Note/CC messages from DJ software and sends them
+  to endpoint `0x04` for the controller LEDs.
+
+Audio and MIDI deliberately share the same USB session. This prevents the
+second client race that occurs when a standalone MIDI bridge tries to claim the
+NS6 while Core Audio is streaming.
 
 ## Hardware probe
 

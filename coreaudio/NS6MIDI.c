@@ -128,6 +128,13 @@ bool ns6_midi_start(IOUSBInterfaceInterface **new_usb,CFRunLoopRef run_loop){
     if(!new_usb||!run_loop)return false;
     usb=new_usb;input_pipe=0;output_pipe=0;write_head=0;write_tail=0;
     if(!find_pipes()){usb=NULL;return false;}
+    IOReturn input_reset=(*usb)->ClearPipeStallBothEnds(usb,input_pipe);
+    IOReturn output_reset=(*usb)->ClearPipeStallBothEnds(usb,output_pipe);
+    if(input_reset!=kIOReturnSuccess||output_reset!=kIOReturnSuccess){
+        fprintf(stderr,"Numark NS6 MIDI pipe reset failed: input=0x%08x output=0x%08x\n",input_reset,output_reset);
+        usb=NULL;
+        return false;
+    }
     if(MIDIClientCreate(CFSTR("Numark NS6"),NULL,NULL,&client)!=noErr){usb=NULL;return false;}
     if(MIDISourceCreate(client,CFSTR("Numark NS6 Controls"),&source)!=noErr||MIDIDestinationCreate(client,CFSTR("Numark NS6 LEDs"),receive_from_core_midi,NULL,&destination)!=noErr){dispose_endpoints();usb=NULL;return false;}
     atomic_store_explicit(&running,true,memory_order_release);
