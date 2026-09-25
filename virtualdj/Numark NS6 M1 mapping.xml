@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mapper device="NS6M1" author="maurojuniorr" version="850" date="2026-09-25">
+  <map value="PLAY" action="play_pause" />
+  <map value="CUE" action="cue_stop" />
+  <map value="SYNC" action="sync" />
+  <map value="KEYLOCK" action="key_lock" />
+  <map value="REVERSE" action="reverse while_pressed" />
+  <map value="PITCH" action="pitch_slider" />
+  <map value="PITCHBEND_MINUS" action="pitch_bend -8% while_pressed" />
+  <map value="PITCHBEND_PLUS" action="pitch_bend +8% while_pressed" />
+  <map value="JOG" action="touchwheel" />
+  <map value="JOG_TOUCH" action="touchwheel_touch" />
+  <map value="LOOP" action="loop" />
+  <map value="LOOP_HALF" action="loop_half" />
+  <map value="LOOP_DOUBLE" action="loop_double" />
+  <map value="LOOP_MOVE_LEFT" action="loop_move -1" />
+  <map value="LOOP_MOVE_RIGHT" action="loop_move +1" />
+  <map value="LEVEL" action="volume_slider" />
+  <map value="GAIN" action="gain_slider" />
+  <map value="HIGH" action="eq_high" />
+  <map value="MID" action="eq_mid" />
+  <map value="LOW" action="eq_low" />
+  <map value="CROSSFADER" action="crossfader" />
+  <map value="PFL" action="pfl" />
+  <map value="BROWSE" action="browser_scroll" />
+  <map value="BROWSE_PUSH" action="browser_enter" />
+  <map value="LOAD" action="load" />
+  <map value="FX_SELECT_A" action="effect_select +1" />
+  <map value="FX_SELECT_B" action="effect_select +1" />
+  <map value="FX_A" action="effect_active" />
+  <map value="FX_B" action="effect_active" />
+  <map value="FX_MIX_A" action="effect_slider 1" />
+  <map value="FX_MIX_B" action="effect_slider 1" />
+  <map value="HOTCUE_1" action="hot_cue 1" />
+  <map value="HOTCUE_2" action="hot_cue 2" />
+  <map value="HOTCUE_3" action="hot_cue 3" />
+  <map value="HOTCUE_4" action="hot_cue 4" />
+  <map value="HOTCUE_5" action="hot_cue 5" />
+  <map value="LED_PLAY" action="loaded ? play ? on : blink" />
+  <map value="LED_CUE" action="loaded ? cue ? on : pause ? blink : off" />
+  <map value="LED_SYNC" action="loaded ? sync" />
+  <map value="LED_KEYLOCK" action="key_lock" />
+  <map value="LED_REVERSE" action="reverse" />
+  <map value="LED_LOOP" action="loop" />
+  <map value="LED_PFL" action="pfl" />
+  <map value="LED_HOTCUE_1" action="cue_exists 1" />
+  <map value="LED_HOTCUE_2" action="cue_exists 2" />
+  <map value="LED_HOTCUE_3" action="cue_exists 3" />
+  <map value="LED_HOTCUE_4" action="cue_exists 4" />
+  <map value="LED_HOTCUE_5" action="cue_exists 5" />
+</mapper>

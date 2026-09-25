@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Numark NS6 original, exposed by the macOS Apple-Silicon MIDI bridge. -->
+<device name="NS6M1" author="maurojuniorr" description="Numark NS6 (Apple Silicon)" version="850" type="MIDI" macdrivername="Numark NS6" macdrivernameout="Numark NS6" decks="4">
+  <init sendsysex="F000013F7F79500010040100000004040E0F00000E050F040C060B0F0D0CF7" />
+  <init sendsysex="F000013F7F79600001490100000000F7" />
+  <button note="0x11" name="PLAY" autoled="true" deck="1" channel="1" />
+  <button note="0x10" name="CUE" autoled="true" deck="1" channel="1" />
+  <button note="0x0F" name="SYNC" autoled="true" deck="1" channel="1" />
+  <button note="0x1B" name="KEYLOCK" autoled="true" deck="1" channel="1" />
+  <button note="0x1C" name="REVERSE" autoled="true" deck="1" channel="1" />
+  <button note="0x24" name="LOOP" autoled="true" deck="1" channel="1" />
+  <button note="0x13" name="HOTCUE_1" autoled="true" deck="1" channel="1" />
+  <button note="0x14" name="HOTCUE_2" autoled="true" deck="1" channel="1" />
+  <button note="0x15" name="HOTCUE_3" autoled="true" deck="1" channel="1" />
+  <button note="0x16" name="HOTCUE_4" autoled="true" deck="1" channel="1" />
+  <button note="0x17" name="HOTCUE_5" autoled="true" deck="1" channel="1" />
+  <button note="0x12" name="SHIFT" deck="1" channel="1" />
+  <button note="0x18" name="PITCHBEND_MINUS" deck="1" channel="1" />
+  <button note="0x19" name="PITCHBEND_PLUS" deck="1" channel="1" />
+  <button note="0x22" name="LOOP_HALF" deck="1" channel="1" />
+  <button note="0x23" name="LOOP_DOUBLE" deck="1" channel="1" />
+  <button note="0x25" name="LOOP_MOVE_LEFT" deck="1" channel="1" />
+  <button note="0x26" name="LOOP_MOVE_RIGHT" deck="1" channel="1" />
+  <slider cc="0x21" ccmsb="0x01" name="PITCH" inverted="true" ghost="false" deck="1" channel="1" />
+  <fulljog cc="0x20" ccmsb="0x00" max="16383" full="2048" name="JOG" deck="1" channel="1" />
+  <button note="0x2C" name="JOG_TOUCH" deck="1" channel="1" />
+  <button note="0x11" name="PLAY" autoled="true" deck="2" channel="2" />
+  <button note="0x10" name="CUE" autoled="true" deck="2" channel="2" />
+  <button note="0x0F" name="SYNC" autoled="true" deck="2" channel="2" />
+  <button note="0x1B" name="KEYLOCK" autoled="true" deck="2" channel="2" />
+  <button note="0x1C" name="REVERSE" autoled="true" deck="2" channel="2" />
+  <button note="0x24" name="LOOP" autoled="true" deck="2" channel="2" />
+  <button note="0x13" name="HOTCUE_1" autoled="true" deck="2" channel="2" />
+  <button note="0x14" name="HOTCUE_2" autoled="true" deck="2" channel="2" />
+  <button note="0x15" name="HOTCUE_3" autoled="true" deck="2" channel="2" />
+  <button note="0x16" name="HOTCUE_4" autoled="true" deck="2" channel="2" />
+  <button note="0x17" name="HOTCUE_5" autoled="true" deck="2" channel="2" />
+  <button note="0x12" name="SHIFT" deck="2" channel="2" />
+  <button note="0x18" name="PITCHBEND_MINUS" deck="2" channel="2" />
+  <button note="0x19" name="PITCHBEND_PLUS" deck="2" channel="2" />
+  <button note="0x22" name="LOOP_HALF" deck="2" channel="2" />
+  <button note="0x23" name="LOOP_DOUBLE" deck="2" channel="2" />
+  <button note="0x25" name="LOOP_MOVE_LEFT" deck="2" channel="2" />
+  <button note="0x26" name="LOOP_MOVE_RIGHT" deck="2" channel="2" />
+  <slider cc="0x21" ccmsb="0x01" name="PITCH" inverted="true" ghost="false" deck="2" channel="2" />
+  <fulljog cc="0x20" ccmsb="0x00" max="16383" full="2048" name="JOG" deck="2" channel="2" />
+  <button note="0x2C" name="JOG_TOUCH" deck="2" channel="2" />
+  <button note="0x11" name="PLAY" autoled="true" deck="3" channel="3" />
+  <button note="0x10" name="CUE" autoled="true" deck="3" channel="3" />
+  <button note="0x0F" name="SYNC" autoled="true" deck="3" channel="3" />
+  <button note="0x1B" name="KEYLOCK" autoled="true" deck="3" channel="3" />
+  <button note="0x1C" name="REVERSE" autoled="true" deck="3" channel="3" />
+  <button note="0x24" name="LOOP" autoled="true" deck="3" channel="3" />
+  <button note="0x13" name="HOTCUE_1" autoled="true" deck="3" channel="3" />
+  <button note="0x14" name="HOTCUE_2" autoled="true" deck="3" channel="3" />
+  <button note="0x15" name="HOTCUE_3" autoled="true" deck="3" channel="3" />
+  <button note="0x16" name="HOTCUE_4" autoled="true" deck="3" channel="3" />
+  <button note="0x17" name="HOTCUE_5" autoled="true" deck="3" channel="3" />
+  <button note="0x12" name="SHIFT" deck="3" channel="3" />
+  <button note="0x18" name="PITCHBEND_MINUS" deck="3" channel="3" />
+  <button note="0x19" name="PITCHBEND_PLUS" deck="3" channel="3" />
+  <button note="0x22" name="LOOP_HALF" deck="3" channel="3" />
+  <button note="0x23" name="LOOP_DOUBLE" deck="3" channel="3" />
+  <button note="0x25" name="LOOP_MOVE_LEFT" deck="3" channel="3" />
+  <button note="0x26" name="LOOP_MOVE_RIGHT" deck="3" channel="3" />
+  <slider cc="0x21" ccmsb="0x01" name="PITCH" inverted="true" ghost="false" deck="3" channel="3" />
+  <fulljog cc="0x20" ccmsb="0x00" max="16383" full="2048" name="JOG" deck="3" channel="3" />
+  <button note="0x2C" name="JOG_TOUCH" deck="3" channel="3" />
+  <button note="0x11" name="PLAY" autoled="true" deck="4" channel="4" />
+  <button note="0x10" name="CUE" autoled="true" deck="4" channel="4" />
+  <button note="0x0F" name="SYNC" autoled="true" deck="4" channel="4" />
+  <button note="0x1B" name="KEYLOCK" autoled="true" deck="4" channel="4" />
+  <button note="0x1C" name="REVERSE" autoled="true" deck="4" channel="4" />
+  <button note="0x24" name="LOOP" autoled="true" deck="4" channel="4" />
+  <button note="0x13" name="HOTCUE_1" autoled="true" deck="4" channel="4" />
+  <button note="0x14" name="HOTCUE_2" autoled="true" deck="4" channel="4" />
+  <button note="0x15" name="HOTCUE_3" autoled="true" deck="4" channel="4" />
+  <button note="0x16" name="HOTCUE_4" autoled="true" deck="4" channel="4" />
+  <button note="0x17" name="HOTCUE_5" autoled="true" deck="4" channel="4" />
+  <button note="0x12" name="SHIFT" deck="4" channel="4" />
+  <button note="0x18" name="PITCHBEND_MINUS" deck="4" channel="4" />
+  <button note="0x19" name="PITCHBEND_PLUS" deck="4" channel="4" />
+  <button note="0x22" name="LOOP_HALF" deck="4" channel="4" />
+  <button note="0x23" name="LOOP_DOUBLE" deck="4" channel="4" />
+  <button note="0x25" name="LOOP_MOVE_LEFT" deck="4" channel="4" />
+  <button note="0x26" name="LOOP_MOVE_RIGHT" deck="4" channel="4" />
+  <slider cc="0x21" ccmsb="0x01" name="PITCH" inverted="true" ghost="false" deck="4" channel="4" />
+  <fulljog cc="0x20" ccmsb="0x00" max="16383" full="2048" name="JOG" deck="4" channel="4" />
+  <button note="0x2C" name="JOG_TOUCH" deck="4" channel="4" />
+  <slider cc="0x28" ccmsb="0x08" name="LEVEL" deck="1" channel="0" />
+  <slider cc="0x2D" ccmsb="0x0D" name="LEVEL" deck="2" channel="0" />
+  <slider cc="0x33" ccmsb="0x13" name="LEVEL" deck="3" channel="0" />
+  <slider cc="0x38" ccmsb="0x18" name="LEVEL" deck="4" channel="0" />
+  <slider cc="0x2C" ccmsb="0x0C" name="GAIN" deck="1" channel="0" />
+  <slider cc="0x31" ccmsb="0x11" name="GAIN" deck="2" channel="0" />
+  <slider cc="0x37" ccmsb="0x17" name="GAIN" deck="3" channel="0" />
+  <slider cc="0x3C" ccmsb="0x1C" name="GAIN" deck="4" channel="0" />
+  <slider cc="0x29" ccmsb="0x09" name="HIGH" deck="1" channel="0" zero="0x40" />
+  <slider cc="0x2A" ccmsb="0x0A" name="MID" deck="1" channel="0" zero="0x40" />
+  <slider cc="0x2B" ccmsb="0x0B" name="LOW" deck="1" channel="0" zero="0x40" />
+  <slider cc="0x2E" ccmsb="0x0E" name="HIGH" deck="2" channel="0" zero="0x40" />
+  <slider cc="0x2F" ccmsb="0x0F" name="MID" deck="2" channel="0" zero="0x40" />
+  <slider cc="0x30" ccmsb="0x10" name="LOW" deck="2" channel="0" zero="0x40" />
+  <slider cc="0x34" ccmsb="0x14" name="HIGH" deck="3" channel="0" zero="0x40" />
+  <slider cc="0x35" ccmsb="0x15" name="MID" deck="3" channel="0" zero="0x40" />
+  <slider cc="0x36" ccmsb="0x16" name="LOW" deck="3" channel="0" zero="0x40" />
+  <slider cc="0x39" ccmsb="0x19" name="HIGH" deck="4" channel="0" zero="0x40" />
+  <slider cc="0x3A" ccmsb="0x1A" name="MID" deck="4" channel="0" zero="0x40" />
+  <slider cc="0x3B" ccmsb="0x1B" name="LOW" deck="4" channel="0" zero="0x40" />
+  <slider cc="0x27" ccmsb="0x07" name="CROSSFADER" channel="0" />
+  <button note="0x31" name="PFL" deck="1" channel="0" autoled="true" />
+  <button note="0x32" name="PFL" deck="2" channel="0" autoled="true" />
+  <button note="0x33" name="PFL" deck="3" channel="0" autoled="true" />
+  <button note="0x34" name="PFL" deck="4" channel="0" autoled="true" />
+  <encoder cc="0x44" zero="0x40" name="BROWSE" channel="0" />
+  <button note="0x08" name="BROWSE_PUSH" channel="0" />
+  <button note="0x0C" name="LOAD" deck="1" channel="0" />
+  <button note="0x0E" name="LOAD" deck="2" channel="0" />
+  <button note="0x0C" name="LOAD" deck="3" channel="2" />
+  <button note="0x0E" name="LOAD" deck="4" channel="3" />
+  <encoder cc="0x5A" zero="0x40" name="FX_SELECT_A" channel="0" />
+  <encoder cc="0x5B" zero="0x40" name="FX_SELECT_B" channel="0" />
+  <button note="0x2D" name="FX_A" channel="0" autoled="true" />
+  <button note="0x2F" name="FX_B" channel="0" autoled="true" />
+  <slider cc="0x77" ccmsb="0x57" name="FX_MIX_A" channel="0" />
+  <slider cc="0x79" ccmsb="0x59" name="FX_MIX_B" channel="0" />
+</device>

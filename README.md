@@ -61,3 +61,19 @@ The expected NS6 descriptor layout is:
 The next transport milestone starts silence URBs, records actual completion
 cadence and buffer occupancy, and writes a timestamped CSV trace. That gives
 us a measured device rate before implementing the adaptive resampler.
+
+## VirtualDJ
+
+The driver repository includes a native CoreMIDI definition and mapper in
+[`virtualdj/`](virtualdj/). Install both files while VirtualDJ is closed:
+
+```sh
+cp virtualdj/NS6M1.xml "$HOME/Library/Application Support/VirtualDJ/Devices/"
+cp "virtualdj/Numark NS6 M1 mapping.xml" "$HOME/Library/Application Support/VirtualDJ/Mappers/"
+```
+
+After reopening VirtualDJ, it detects **Numark NS6 (Apple Silicon)** as
+`NS6M1`. The mapper includes four-deck transport, touch jogs, pitch, hotcues,
+loops, mixer controls, PFL, browser, FX controls, and button LED feedback.
+VirtualDJ requires a VDJ Pro license for continuous use of this external
+controller.
