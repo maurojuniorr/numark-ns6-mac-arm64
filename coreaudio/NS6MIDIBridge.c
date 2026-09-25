@@ -56,6 +56,16 @@ int main(void){
     MIDIClientRef client=0;MIDIEndpointRef source=0,destination=0;
     signal(SIGINT,stop);signal(SIGTERM,stop);
     if(!open_socket()||MIDIClientCreate(CFSTR("Numark NS6 MIDI Bridge"),NULL,NULL,&client)!=noErr||MIDISourceCreate(client,CFSTR("Numark NS6"),&source)!=noErr||MIDIDestinationCreate(client,CFSTR("Numark NS6"),receive_from_application,NULL,&destination)!=noErr){fprintf(stderr,"Could not start Numark NS6 MIDI Bridge\n");if(destination)MIDIEndpointDispose(destination);if(source)MIDIEndpointDispose(source);if(client)MIDIClientDispose(client);if(socket_fd>=0)close(socket_fd);return 1;}
+    /* Virtual endpoints do not inherit USB descriptors. Publish the NS6
+       identity so host applications can associate their controller profile. */
+    MIDIObjectSetStringProperty(source,kMIDIPropertyManufacturer,CFSTR("Numark"));
+    MIDIObjectSetStringProperty(source,kMIDIPropertyModel,CFSTR("NS6"));
+    MIDIObjectSetStringProperty(source,kMIDIPropertyDisplayName,CFSTR("Numark NS6 MIDI"));
+    MIDIObjectSetIntegerProperty(source,kMIDIPropertyUniqueID,0x4e533601);
+    MIDIObjectSetStringProperty(destination,kMIDIPropertyManufacturer,CFSTR("Numark"));
+    MIDIObjectSetStringProperty(destination,kMIDIPropertyModel,CFSTR("NS6"));
+    MIDIObjectSetStringProperty(destination,kMIDIPropertyDisplayName,CFSTR("Numark NS6 MIDI"));
+    MIDIObjectSetIntegerProperty(destination,kMIDIPropertyUniqueID,0x4e533602);
     fprintf(stderr,"Numark NS6 MIDI Bridge ready\n");
     while(running){
         unsigned char data[64];ssize_t length=recv(socket_fd,data,sizeof(data),0);
