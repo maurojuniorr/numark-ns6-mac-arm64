@@ -10,16 +10,22 @@ sequence, and publishes four playback channels at 44.1 kHz S24_3LE.
 
 ## MIDI
 
-When an app starts playback, the HAL also publishes two CoreMIDI endpoints:
+The HAL owns the USB session and sends MIDI over a local loopback socket to
+the companion **Numark NS6 MIDI Bridge**. The bridge runs in the logged-in
+user session and publishes two CoreMIDI endpoints:
 
 - **Numark NS6 Controls** receives the controller's packed 42-byte USB MIDI
   messages through endpoint `0x83`.
 - **Numark NS6 LEDs** accepts Note/CC messages from DJ software and sends them
   to endpoint `0x04` for the controller LEDs.
 
-Audio and MIDI deliberately share the same USB session. This prevents the
-second client race that occurs when a standalone MIDI bridge tries to claim the
-NS6 while Core Audio is streaming.
+Only the HAL claims the NS6 USB interface; the bridge never opens it. This
+keeps MIDI and audio in one USB session while ensuring the endpoints are
+visible to Mixxx and other desktop applications.
+
+The installer registers the bridge as a LaunchAgent, so it starts with macOS.
+After installing, select **Numark NS6 Controls** as the controller input and
+**Numark NS6 LEDs** as the controller output in Mixxx.
 
 ## Hardware probe
 

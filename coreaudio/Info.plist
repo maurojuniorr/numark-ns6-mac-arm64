@@ -7,7 +7,7 @@
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>Numark NS6</string>
   <key>CFBundlePackageType</key><string>BNDL</string>
-  <key>CFBundleShortVersionString</key><string>0.1</string>
+  <key>CFBundleShortVersionString</key><string>0.2.0</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>CFPlugInFactories</key><dict>
     <key>AC8269E5-219B-4B2D-85B0-70A8260D6918</key><string>NS6_Create</string>

@@ -5,8 +5,9 @@
 #include <IOKit/usb/IOUSBLib.h>
 #include <stdbool.h>
 
-/* The USB transport owns the interface. CoreMIDI is started only after that
- * interface has been configured and its async event source is on this run loop. */
+/* The USB transport owns the interface.  MIDI is forwarded over loopback to
+ * the user-session bridge, because HAL plug-ins run inside coreaudiod and
+ * cannot publish CoreMIDI endpoints visible to desktop applications. */
 bool ns6_midi_start(IOUSBInterfaceInterface **usb, CFRunLoopRef run_loop);
 void ns6_midi_stop(void);
 
