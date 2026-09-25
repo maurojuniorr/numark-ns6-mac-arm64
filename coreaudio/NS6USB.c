@@ -1,5 +1,6 @@
 #include "NS6USB.h"
 #include "NS6Transport.h"
+#include "NS6MIDI.h"
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOCFPlugIn.h>
 #include <IOKit/IOKitLib.h>
@@ -150,9 +151,11 @@ static bool initialize(void){
         result=(*interface)->LowLatencyCreateBuffer(interface,(void**)&slots[i].data,PACKETS*MAX_PACKET,kUSBLowLatencyWriteBuffer);if(result!=kIOReturnSuccess)return usb_failure("create audio buffer",result);
         result=(*interface)->LowLatencyCreateBuffer(interface,(void**)&slots[i].frames,sizeof(*slots[i].frames)*PACKETS,kUSBLowLatencyFrameListBuffer);if(result!=kIOReturnSuccess)return usb_failure("create frame list",result);
     }
+    if(!ns6_midi_start(interface,run_loop))fprintf(stderr,"Numark NS6 MIDI unavailable; continuing with audio only\n");
     return true;
 }
 static void cleanup(void){
+    ns6_midi_stop();
     if(interface)(*interface)->AbortPipe(interface,1); if(run_loop)CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.2,false);
     if(interface)for(unsigned i=0;i<SLOT_COUNT;++i){if(slots[i].data)(*interface)->LowLatencyDestroyBuffer(interface,slots[i].data);if(slots[i].frames)(*interface)->LowLatencyDestroyBuffer(interface,slots[i].frames);} memset(slots,0,sizeof(slots));
     if(run_loop&&source)CFRunLoopRemoveSource(run_loop,source,kCFRunLoopDefaultMode); if(source)CFRelease(source); source=NULL;

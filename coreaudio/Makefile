@@ -7,9 +7,9 @@ PACKAGE_ID := io.github.maurojuniorr.numark-ns6
 PACKAGE_ROOT := build/package-root
 DIST := dist
 all: $(BUILD)/MacOS/NumarkNS6 $(BUILD)/Info.plist app
-$(BUILD)/MacOS/NumarkNS6: NS6HAL.c NS6Transport.c NS6USB.c
+$(BUILD)/MacOS/NumarkNS6: NS6HAL.c NS6Transport.c NS6USB.c NS6MIDI.c
 	mkdir -p $(BUILD)/MacOS
-	$(CC) $(CFLAGS) -bundle NS6HAL.c NS6Transport.c NS6USB.c -o $@ -framework CoreAudio -framework CoreFoundation -framework IOKit
+	$(CC) $(CFLAGS) -bundle NS6HAL.c NS6Transport.c NS6USB.c NS6MIDI.c -o $@ -framework CoreAudio -framework CoreFoundation -framework CoreMIDI -framework IOKit
 $(BUILD)/Info.plist: Info.plist
 	mkdir -p $(BUILD)
 	cp $< $@
@@ -26,8 +26,8 @@ $(APP)/Contents/Resources/NS6Status.icns: status-app/NS6Status.icns
 clean:
 	rm -rf build
 
-usb-test: NS6USBTest.c NS6Transport.c NS6USB.c
-	$(CC) $(CFLAGS) NS6USBTest.c NS6Transport.c NS6USB.c -o build/ns6-usb-test -framework CoreAudio -framework CoreFoundation -framework IOKit -lm
+usb-test: NS6USBTest.c NS6Transport.c NS6USB.c NS6MIDI.c
+	$(CC) $(CFLAGS) NS6USBTest.c NS6Transport.c NS6USB.c NS6MIDI.c -o build/ns6-usb-test -framework CoreAudio -framework CoreFoundation -framework CoreMIDI -framework IOKit -lm
 
 audio-list: AudioList.c
 	$(CC) $(CFLAGS) AudioList.c -o build/audio-list -framework CoreAudio -framework CoreFoundation
