@@ -11,6 +11,7 @@
 
 #define DRIVER_PORT 48238
 #define BRIDGE_PORT 48239
+#define MIDI_SOCKET_BUFFER (1024 * 1024)
 
 static volatile sig_atomic_t running=1;
 static int socket_fd=-1;
@@ -45,7 +46,7 @@ static void receive_from_application(const MIDIPacketList *list,void *reference,
 static bool open_socket(void){
     socket_fd=socket(AF_INET,SOCK_DGRAM,0);
     if(socket_fd<0)return false;
-    int reuse=1;setsockopt(socket_fd,SOL_SOCKET,SO_REUSEADDR,&reuse,sizeof(reuse));
+    int reuse=1;setsockopt(socket_fd,SOL_SOCKET,SO_REUSEADDR,&reuse,sizeof(reuse));setsockopt(socket_fd,SOL_SOCKET,SO_RCVBUF,&(int){MIDI_SOCKET_BUFFER},sizeof(int));
     struct sockaddr_in local={.sin_len=sizeof(local),.sin_family=AF_INET,.sin_port=htons(BRIDGE_PORT),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
     if(bind(socket_fd,(const struct sockaddr *)&local,sizeof(local))<0){close(socket_fd);socket_fd=-1;return false;}
     struct timeval timeout={.tv_sec=1};setsockopt(socket_fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));

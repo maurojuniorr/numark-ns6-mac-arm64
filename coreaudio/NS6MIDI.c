@@ -15,6 +15,7 @@
 #define MIDI_TERMINATOR 0x00
 #define MIDI_READ_SLOTS 4
 #define MIDI_WRITE_QUEUE 256
+#define MIDI_SOCKET_BUFFER (1024 * 1024)
 #define DRIVER_PORT 48238
 #define BRIDGE_PORT 48239
 
@@ -44,7 +45,24 @@ static void enqueue(const unsigned char *data,unsigned length){
     if(next!=head){memset(queue[tail].data,MIDI_IDLE_BYTE,MIDI_PACKET_BYTES);memcpy(queue[tail].data,data,length);queue[tail].data[MIDI_PACKET_BYTES-1]=MIDI_TERMINATOR;tail=next;pthread_cond_signal(&queue_ready);}pthread_mutex_unlock(&queue_lock);
 }
 static void forward_to_bridge(const unsigned char *data,unsigned length){if(outbound_socket>=0)sendto(outbound_socket,data,length,0,(const struct sockaddr *)&bridge_address,sizeof(bridge_address));}
-static void publish_packet(const unsigned char *data,UInt32 length){for(UInt32 offset=0;offset+2<length;offset+=3){unsigned char status=data[offset];if(status==MIDI_IDLE_BYTE||status==MIDI_TERMINATOR||!(status&0x80))continue;forward_to_bridge(data+offset,3);}}
+/*
+ * The NS6 bulk endpoint delivers fixed 42-byte reports containing MIDI
+ * triplets and idle bytes. Forward one compact, ordered datagram per USB
+ * report. Sending every triplet as a separate UDP datagram made a busy jog
+ * stream capable of overtaking or dropping a button Note Off, leaving CUE
+ * held in the host application.
+ */
+static void publish_packet(const unsigned char *data,UInt32 length){
+    unsigned char messages[MIDI_PACKET_BYTES];
+    UInt32 used=0;
+    for(UInt32 offset=0;offset+2<length;offset+=3){
+        unsigned char status=data[offset];
+        if(status==MIDI_IDLE_BYTE||status==MIDI_TERMINATOR||!(status&0x80))continue;
+        memcpy(messages+used,data+offset,3);
+        used+=3;
+    }
+    if(used)forward_to_bridge(messages,used);
+}
 static void submit_read(struct read_slot *slot);
 static void read_complete(void *reference,IOReturn status,void *argument){struct read_slot *slot=reference;if(status==kIOReturnSuccess){UInt32 length=(UInt32)(uintptr_t)argument;if(length>MIDI_PACKET_BYTES)length=MIDI_PACKET_BYTES;publish_packet(slot->data,length);}if(atomic_load(&running))submit_read(slot);}
 static void submit_read(struct read_slot *slot){if((*usb)->ReadPipeAsync(usb,input_pipe,slot->data,sizeof(slot->data),read_complete,slot)!=kIOReturnSuccess&&atomic_load(&running))fprintf(stderr,"Numark NS6 MIDI input unavailable\n");}
@@ -52,7 +70,7 @@ static void *write_worker(void *unused){(void)unused;for(;;){struct write_packet
 static void *receive_worker(void *unused){(void)unused;unsigned char data[41];while(atomic_load(&running)){ssize_t length=recv(inbound_socket,data,sizeof(data),0);if(length>0)enqueue(data,(unsigned)length);}return NULL;}
 static bool open_sockets(void){
     inbound_socket=socket(AF_INET,SOCK_DGRAM,0);outbound_socket=socket(AF_INET,SOCK_DGRAM,0);if(inbound_socket<0||outbound_socket<0)return false;
-    int reuse=1;setsockopt(inbound_socket,SOL_SOCKET,SO_REUSEADDR,&reuse,sizeof(reuse));struct sockaddr_in local={.sin_len=sizeof(local),.sin_family=AF_INET,.sin_port=htons(DRIVER_PORT),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
+    int reuse=1;setsockopt(inbound_socket,SOL_SOCKET,SO_REUSEADDR,&reuse,sizeof(reuse));setsockopt(inbound_socket,SOL_SOCKET,SO_RCVBUF,&(int){MIDI_SOCKET_BUFFER},sizeof(int));setsockopt(outbound_socket,SOL_SOCKET,SO_SNDBUF,&(int){MIDI_SOCKET_BUFFER},sizeof(int));struct sockaddr_in local={.sin_len=sizeof(local),.sin_family=AF_INET,.sin_port=htons(DRIVER_PORT),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
     if(bind(inbound_socket,(struct sockaddr *)&local,sizeof(local))<0)return false;
     struct timeval timeout={.tv_sec=1};setsockopt(inbound_socket,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));bridge_address=(struct sockaddr_in){.sin_len=sizeof(bridge_address),.sin_family=AF_INET,.sin_port=htons(BRIDGE_PORT),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};return true;
 }
