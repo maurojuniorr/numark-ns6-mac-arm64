@@ -22,7 +22,7 @@
 #define STARTUP_FRAMES 2048
 #define STARTUP_WAIT_MS 100
 
-struct slot { IOUSBLowLatencyIsocFrame *frames; unsigned char *data; };
+struct slot { IOUSBLowLatencyIsocFrame *frames; unsigned char *data; unsigned consecutive_errors; };
 static IOUSBInterfaceInterface **interface;
 static IOUSBInterfaceInterface **auxiliary_interface;
 static CFRunLoopSourceRef source;
@@ -32,6 +32,7 @@ static pthread_t thread;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
 static atomic_bool running;
+static atomic_bool recovery_requested;
 static bool thread_created, initialized;
 static uint64_t fraction;
 
@@ -115,10 +116,29 @@ static void fill(struct slot *slot){
     }
 }
 static void submit(struct slot *slot);
-static void complete(void *reference,IOReturn status,void *argument){(void)argument;if(status==kIOReturnSuccess&&atomic_load_explicit(&running,memory_order_acquire))submit(reference);}
+static void request_recovery(const char *operation,IOReturn result){
+    fprintf(stderr,"Numark NS6 %s failed: 0x%08x; restarting USB audio stream\n",operation,result);
+    atomic_store_explicit(&recovery_requested,true,memory_order_release);
+    if(run_loop)CFRunLoopWakeUp(run_loop);
+}
+static void complete(void *reference,IOReturn status,void *argument){
+    (void)argument;
+    struct slot *slot=reference;
+    if(!atomic_load_explicit(&running,memory_order_acquire)||atomic_load_explicit(&recovery_requested,memory_order_acquire))return;
+    if(status!=kIOReturnSuccess){
+        ++slot->consecutive_errors;
+        fprintf(stderr,"Numark NS6 isochronous completion failed: 0x%08x (%u consecutive)\n",status,slot->consecutive_errors);
+        if(slot->consecutive_errors>=3)request_recovery("isochronous transfer",status);
+        else submit(slot);
+        return;
+    }
+    slot->consecutive_errors=0;
+    submit(slot);
+}
 static void submit(struct slot *slot){
+    if(!atomic_load_explicit(&running,memory_order_acquire)||atomic_load_explicit(&recovery_requested,memory_order_acquire))return;
     fill(slot); IOReturn result=(*interface)->LowLatencyWriteIsochPipeAsync(interface,1,slot->data,0,PACKETS,1,slot->frames,complete,slot);
-    if(result!=kIOReturnSuccess)atomic_store_explicit(&running,false,memory_order_release);
+    if(result!=kIOReturnSuccess)request_recovery("submit isochronous transfer",result);
 }
 static bool initialize(void){
     unsigned char capability[64]={0},rate[3]={0x44,0xac,0}; interface=open_interface(); if(!interface)return false;
@@ -152,18 +172,37 @@ static void cleanup(void){
     if(interface){(*interface)->USBInterfaceClose(interface);(*interface)->Release(interface);} interface=NULL;
 }
 static void *worker(void *unused){
-    (void)unused; bool ready=initialize(); pthread_mutex_lock(&lock); initialized=ready; if(!ready)atomic_store(&running,false); pthread_cond_broadcast(&changed); pthread_mutex_unlock(&lock);
-    if(ready){
+    (void)unused;
+    bool first_attempt=true;
+    const struct timespec recovery_delay={0,500000000};
+    while(atomic_load_explicit(&running,memory_order_acquire)){
+        atomic_store_explicit(&recovery_requested,false,memory_order_release);
+        bool ready=initialize();
+        if(first_attempt){
+            pthread_mutex_lock(&lock); initialized=ready; if(!ready)atomic_store(&running,false); pthread_cond_broadcast(&changed); pthread_mutex_unlock(&lock);
+            first_attempt=false;
+            if(!ready){cleanup();break;}
+        }else if(!ready){
+            cleanup();
+            if(atomic_load_explicit(&running,memory_order_acquire))nanosleep(&recovery_delay,NULL);
+            continue;
+        }
         const struct timespec millisecond={0,1000000};
         for(unsigned waited=0;waited<STARTUP_WAIT_MS&&atomic_load_explicit(&running,memory_order_acquire)&&ns6_transport_available()<STARTUP_FRAMES;++waited)nanosleep(&millisecond,NULL);
         for(unsigned i=0;i<SLOT_COUNT;++i)submit(&slots[i]);
         if(!ns6_midi_start(interface,run_loop))fprintf(stderr,"Numark NS6 MIDI unavailable; continuing with audio only\n");
-        while(atomic_load_explicit(&running,memory_order_acquire))CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.1,false);
-    } cleanup(); return NULL;
+        while(atomic_load_explicit(&running,memory_order_acquire)&&!atomic_load_explicit(&recovery_requested,memory_order_acquire))CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.1,false);
+        cleanup();
+        if(atomic_load_explicit(&running,memory_order_acquire)){
+            fprintf(stderr,"Numark NS6 attempting automatic USB audio recovery\n");
+            nanosleep(&recovery_delay,NULL);
+        }
+    }
+    return NULL;
 }
 bool ns6_usb_start(void){
     pthread_mutex_lock(&lock); if(thread_created){bool result=initialized;pthread_mutex_unlock(&lock);return result;}
-    fraction=0; initialized=false; ns6_transport_reset(); atomic_store(&running,true);
+    fraction=0; initialized=false; ns6_transport_reset(); atomic_store(&recovery_requested,false); atomic_store(&running,true);
     if(pthread_create(&thread,NULL,worker,NULL)!=0){atomic_store(&running,false);pthread_mutex_unlock(&lock);return false;}
     thread_created=true; while(!initialized&&atomic_load(&running))pthread_cond_wait(&changed,&lock); bool result=initialized; pthread_mutex_unlock(&lock);
     if(!result){pthread_join(thread,NULL);pthread_mutex_lock(&lock);thread_created=false;pthread_mutex_unlock(&lock);} return result;
