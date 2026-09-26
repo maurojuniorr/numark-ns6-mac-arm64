@@ -79,13 +79,16 @@ final class StatusController: NSViewController {
             let label = NSTextField(labelWithString: name)
             label.font = .systemFont(ofSize: 14, weight: .semibold)
             let valueLabel = NSTextField(labelWithString: value)
-            valueLabel.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
-            valueLabel.alignment = .right
+            valueLabel.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+            valueLabel.alignment = .left
             valueLabels.append(valueLabel)
             let row = NSStackView(views: [label, valueLabel])
             row.orientation = .horizontal
-            row.distribution = .fillEqually
+            row.distribution = .fill
             row.alignment = .centerY
+            label.widthAnchor.constraint(equalToConstant: 145).isActive = true
+            label.setContentHuggingPriority(.required, for: .horizontal)
+            valueLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
             details.addArrangedSubview(row)
         }
 
@@ -149,7 +152,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = StatusController()
         let window = NSWindow(contentViewController: controller)
         window.title = "Numark NS6 Status"
-        window.setContentSize(NSSize(width: 430, height: 510))
+        window.setContentSize(NSSize(width: 540, height: 510))
         window.styleMask = [.titled, .closable, .miniaturizable]
         window.center()
         window.makeKeyAndOrderFront(nil)
