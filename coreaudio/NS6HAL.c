@@ -6,6 +6,7 @@
 #include <IOKit/IOKitLib.h>
 #include <IOKit/usb/IOUSBLib.h>
 #include <mach/mach_time.h>
+#include <os/log.h>
 #include <pthread.h>
 #include <stddef.h>
 #include <stdatomic.h>
@@ -23,6 +24,7 @@ static mach_timebase_info_data_t timebase;
 static IONotificationPortRef usb_notifications;
 static io_iterator_t usb_added,usb_removed;
 static atomic_bool device_present;
+static atomic_uint enqueue_failures;
 static pthread_once_t usb_monitor_once=PTHREAD_ONCE_INIT;
 static AudioStreamBasicDescription stream_format={SAMPLE_RATE,kAudioFormatLinearPCM,kAudioFormatFlagIsFloat|kAudioFormatFlagsNativeEndian|kAudioFormatFlagIsPacked,16,1,16,CHANNELS,32,0};
 
@@ -111,10 +113,36 @@ static OSStatus get_property(AudioServerPlugInDriverRef d,AudioObjectID object,p
 }
 static OSStatus set_property(AudioServerPlugInDriverRef d,AudioObjectID o,pid_t p,const AudioObjectPropertyAddress*a,UInt32 q,const void*x,UInt32 n,const void*v){(void)d;(void)o;(void)p;(void)a;(void)q;(void)x;(void)n;(void)v;return kAudioHardwareUnsupportedOperationError;}
 
-static OSStatus start_io(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32 client){(void)d;(void)client;if(object!=DEVICE_ID)return kAudioHardwareBadObjectError;if(!atomic_load(&device_present))return kAudioHardwareNotRunningError;if(io_clients==0){ns6_transport_reset();if(!ns6_usb_start())return kAudioHardwareUnspecifiedError;anchor_host_time=mach_absolute_time();++seed;}++io_clients;return 0;}
-static OSStatus stop_io(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32 client){(void)d;(void)client;if(object!=DEVICE_ID)return kAudioHardwareBadObjectError;if(io_clients&&--io_clients==0)ns6_usb_stop();return 0;}
+static OSStatus start_io(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32 client){
+    (void)d;(void)client;
+    if(object!=DEVICE_ID)return kAudioHardwareBadObjectError;
+    if(!atomic_load(&device_present)){os_log_error(OS_LOG_DEFAULT,"Numark NS6 start_io refused: USB device absent");return kAudioHardwareNotRunningError;}
+    if(io_clients==0){
+        ns6_transport_reset();
+        if(!ns6_usb_start()){os_log_error(OS_LOG_DEFAULT,"Numark NS6 start_io failed: USB transport initialization failed");return kAudioHardwareUnspecifiedError;}
+        anchor_host_time=mach_absolute_time();++seed;atomic_store(&enqueue_failures,0);
+        os_log(OS_LOG_DEFAULT,"Numark NS6 audio stream started (sample rate %.0f, client %u)",SAMPLE_RATE,client);
+    }
+    ++io_clients;
+    return 0;
+}
+static OSStatus stop_io(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32 client){
+    (void)d;
+    if(object!=DEVICE_ID)return kAudioHardwareBadObjectError;
+    if(io_clients&&--io_clients==0){os_log(OS_LOG_DEFAULT,"Numark NS6 audio stream stopping (client %u)",client);ns6_usb_stop();}
+    return 0;
+}
 static OSStatus zero_timestamp(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32 client,Float64 *sample,UInt64 *host_time,UInt64 *out_seed){(void)d;(void)client;if(object!=DEVICE_ID||!sample||!host_time||!out_seed)return kAudioHardwareIllegalOperationError;UInt64 now=mach_absolute_time();double nanos=(double)(now-anchor_host_time)*timebase.numer/timebase.denom;UInt64 frame=(UInt64)(nanos*SAMPLE_RATE/1e9);frame=(frame/BUFFER_FRAMES)*BUFFER_FRAMES;double ticks=(double)frame*1e9/SAMPLE_RATE*timebase.denom/timebase.numer;*sample=(Float64)frame;*host_time=anchor_host_time+(UInt64)ticks;*out_seed=seed;return 0;}
 static OSStatus will_do(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32 client,UInt32 operation,Boolean *will,Boolean *in_place){(void)d;(void)object;(void)client;if(!will||!in_place)return kAudioHardwareIllegalOperationError;*will=operation==kAudioServerPlugInIOOperationWriteMix;*in_place=true;return 0;}
 static OSStatus begin_io(AudioServerPlugInDriverRef d,AudioObjectID o,UInt32 c,UInt32 op,UInt32 frames,const AudioServerPlugInIOCycleInfo*i){(void)d;(void)o;(void)c;(void)op;(void)frames;(void)i;return 0;}
-static OSStatus do_io(AudioServerPlugInDriverRef d,AudioObjectID object,AudioObjectID stream,UInt32 client,UInt32 operation,UInt32 frames,const AudioServerPlugInIOCycleInfo*i,void *main_buffer,void *secondary){(void)d;(void)client;(void)i;(void)secondary;if(object!=DEVICE_ID||stream!=STREAM_ID)return kAudioHardwareBadObjectError;if(operation==kAudioServerPlugInIOOperationWriteMix&&!ns6_transport_enqueue(main_buffer,frames,&stream_format))return kAudioHardwareUnspecifiedError;return 0;}
+static OSStatus do_io(AudioServerPlugInDriverRef d,AudioObjectID object,AudioObjectID stream,UInt32 client,UInt32 operation,UInt32 frames,const AudioServerPlugInIOCycleInfo*i,void *main_buffer,void *secondary){
+    (void)d;(void)client;(void)i;(void)secondary;
+    if(object!=DEVICE_ID||stream!=STREAM_ID)return kAudioHardwareBadObjectError;
+    if(operation==kAudioServerPlugInIOOperationWriteMix&&!ns6_transport_enqueue(main_buffer,frames,&stream_format)){
+        unsigned failures=atomic_fetch_add(&enqueue_failures,1)+1;
+        if(failures==1||failures%100==0)os_log_error(OS_LOG_DEFAULT,"Numark NS6 rejected audio buffer (%u cumulative failures; %u frames)",failures,frames);
+        return kAudioHardwareUnspecifiedError;
+    }
+    return 0;
+}
 static OSStatus end_io(AudioServerPlugInDriverRef d,AudioObjectID o,UInt32 c,UInt32 op,UInt32 frames,const AudioServerPlugInIOCycleInfo*i){(void)d;(void)o;(void)c;(void)op;(void)frames;(void)i;return 0;}

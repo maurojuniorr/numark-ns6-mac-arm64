@@ -34,6 +34,8 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
 static atomic_bool running;
 static atomic_bool recovery_requested;
+static atomic_uint_fast64_t completed_transfers;
+static atomic_uint_fast64_t underrun_frames;
 static bool thread_created, initialized;
 static uint64_t fraction;
 
@@ -112,7 +114,13 @@ static void fill(struct slot *slot){
         unsigned frames=(unsigned)(fraction/8000); fraction%=8000;
         slot->frames[packet].frReqCount=(UInt16)(frames*FRAME_BYTES); slot->frames[packet].frActCount=0; slot->frames[packet].frStatus=0;
         UInt32 received=ns6_transport_dequeue(output,frames);
-        if(received<frames)memset(output+received*FRAME_BYTES,0,(frames-received)*FRAME_BYTES);
+        if(received<frames){
+            uint64_t missing=frames-received;
+            uint64_t previous=atomic_fetch_add_explicit(&underrun_frames,missing,memory_order_relaxed);
+            if(previous/4410!=(previous+missing)/4410)
+                os_log_error(OS_LOG_DEFAULT,"Numark NS6 audio queue underrun: %llu silent frames total",(unsigned long long)(previous+missing));
+            memset(output+received*FRAME_BYTES,0,(frames-received)*FRAME_BYTES);
+        }
         output+=frames*FRAME_BYTES;
     }
 }
@@ -136,6 +144,9 @@ static void complete(void *reference,IOReturn status,void *argument){
         return;
     }
     slot->consecutive_errors=0;
+    uint64_t completed=atomic_fetch_add_explicit(&completed_transfers,1,memory_order_relaxed)+1;
+    if(completed%10000==0)
+        os_log(OS_LOG_DEFAULT,"Numark NS6 USB audio active: %llu transfers, %llu underrun frames, %u queued frames",(unsigned long long)completed,(unsigned long long)atomic_load_explicit(&underrun_frames,memory_order_relaxed),ns6_transport_available());
     submit(slot);
 }
 static void submit(struct slot *slot){
@@ -207,7 +218,7 @@ static void *worker(void *unused){
 }
 bool ns6_usb_start(void){
     pthread_mutex_lock(&lock); if(thread_created){bool result=initialized;pthread_mutex_unlock(&lock);return result;}
-    fraction=0; initialized=false; ns6_transport_reset(); atomic_store(&recovery_requested,false); atomic_store(&running,true);
+    fraction=0; initialized=false; atomic_store(&completed_transfers,0); atomic_store(&underrun_frames,0); ns6_transport_reset(); atomic_store(&recovery_requested,false); atomic_store(&running,true);
     if(pthread_create(&thread,NULL,worker,NULL)!=0){atomic_store(&running,false);pthread_mutex_unlock(&lock);return false;}
     thread_created=true; while(!initialized&&atomic_load(&running))pthread_cond_wait(&changed,&lock); bool result=initialized; pthread_mutex_unlock(&lock);
     if(!result){pthread_join(thread,NULL);pthread_mutex_lock(&lock);thread_created=false;pthread_mutex_unlock(&lock);} return result;
