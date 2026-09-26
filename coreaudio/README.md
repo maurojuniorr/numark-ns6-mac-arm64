@@ -19,10 +19,10 @@ the first eight USB transfers. This prevents the device from alternating
 between empty packets and live audio while CoreAudio is filling its first
 buffers.
 
-During playback, a slow queue controller keeps about 4096 frames buffered and
-adjusts the 5/6-frame USB packet cadence by at most 1,417 ppm. This absorbs the
-small clock difference between the Mac and the NS6 before the PCM queue can
-underflow or overflow during a long session.
+During playback, the USB worker uses a fixed 5/6-frame cadence. The 441/80
+fractional accumulator emits only complete 12-byte frames and averages exactly
+44,100 frames/s; changing packet sizes from the host queue is audible on the
+NS6.
 
 The former Numark package included an Intel-only Ploytec kext. This project
 does not load or depend on it.

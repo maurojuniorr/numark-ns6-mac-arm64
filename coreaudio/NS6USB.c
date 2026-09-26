@@ -21,9 +21,6 @@
 #define MAX_PACKET 156
 #define STARTUP_FRAMES 2048
 #define STARTUP_WAIT_MS 100
-#define QUEUE_TARGET_FRAMES 4096
-#define CONTROL_SLOTS 16
-#define MAX_RATE_ADJUST_Q16 4096
 
 struct slot { IOUSBLowLatencyIsocFrame *frames; unsigned char *data; };
 static IOUSBInterfaceInterface **interface;
@@ -37,8 +34,6 @@ static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
 static atomic_bool running;
 static bool thread_created, initialized;
 static uint64_t fraction;
-static int32_t rate_adjust_q16;
-static unsigned control_slots;
 
 static int property_u16(io_registry_entry_t entry, CFStringRef key, UInt16 *out) {
     CFTypeRef value=IORegistryEntryCreateCFProperty(entry,key,kCFAllocatorDefault,0);
@@ -109,16 +104,10 @@ static IOReturn control(UInt8 type,UInt8 request,UInt16 value,UInt16 index,void 
 }
 static void fill(struct slot *slot){
     unsigned char *output=slot->data;
-    if(++control_slots==CONTROL_SLOTS){
-        int32_t desired=((int32_t)ns6_transport_available()-(int32_t)QUEUE_TARGET_FRAMES)*2;
-        if(desired>MAX_RATE_ADJUST_Q16)desired=MAX_RATE_ADJUST_Q16;
-        if(desired<-MAX_RATE_ADJUST_Q16)desired=-MAX_RATE_ADJUST_Q16;
-        rate_adjust_q16+=(desired-rate_adjust_q16)/8;
-        control_slots=0;
-    }
     for(unsigned packet=0;packet<PACKETS;++packet){
-        fraction+=(uint64_t)(((int64_t)RATE<<16)+rate_adjust_q16);
-        unsigned frames=(unsigned)(fraction/((uint64_t)8000<<16)); fraction%=((uint64_t)8000<<16);
+        /* Whole 12-byte frames, averaging exactly 44,100 frames/s. */
+        fraction+=RATE;
+        unsigned frames=(unsigned)(fraction/8000); fraction%=8000;
         slot->frames[packet].frReqCount=(UInt16)(frames*FRAME_BYTES); slot->frames[packet].frActCount=0; slot->frames[packet].frStatus=0;
         UInt32 received=ns6_transport_dequeue(output,frames);
         if(received<frames)memset(output+received*FRAME_BYTES,0,(frames-received)*FRAME_BYTES);
@@ -174,7 +163,7 @@ static void *worker(void *unused){
 }
 bool ns6_usb_start(void){
     pthread_mutex_lock(&lock); if(thread_created){bool result=initialized;pthread_mutex_unlock(&lock);return result;}
-    fraction=0; rate_adjust_q16=0; control_slots=0; initialized=false; ns6_transport_reset(); atomic_store(&running,true);
+    fraction=0; initialized=false; ns6_transport_reset(); atomic_store(&running,true);
     if(pthread_create(&thread,NULL,worker,NULL)!=0){atomic_store(&running,false);pthread_mutex_unlock(&lock);return false;}
     thread_created=true; while(!initialized&&atomic_load(&running))pthread_cond_wait(&changed,&lock); bool result=initialized; pthread_mutex_unlock(&lock);
     if(!result){pthread_join(thread,NULL);pthread_mutex_lock(&lock);thread_created=false;pthread_mutex_unlock(&lock);} return result;
