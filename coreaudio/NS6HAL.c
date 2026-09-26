@@ -48,7 +48,24 @@ static AudioServerPlugInDriverRef driver=&interface_pointer;
 
 static bool usb_property_u16(io_registry_entry_t entry,CFStringRef key,UInt16 *out){CFTypeRef value=IORegistryEntryCreateCFProperty(entry,key,kCFAllocatorDefault,0);bool ok=value&&CFGetTypeID(value)==CFNumberGetTypeID()&&CFNumberGetValue(value,kCFNumberSInt16Type,out);if(value)CFRelease(value);return ok;}
 static bool ns6_connected(void){io_iterator_t iterator=IO_OBJECT_NULL;io_service_t service;if(IOServiceGetMatchingServices(kIOMainPortDefault,IOServiceMatching("IOUSBHostDevice"),&iterator)!=KERN_SUCCESS)return false;bool found=false;while((service=IOIteratorNext(iterator))){UInt16 vendor=0,product=0;if(usb_property_u16(service,CFSTR(kUSBVendorID),&vendor)&&usb_property_u16(service,CFSTR(kUSBProductID),&product)&&vendor==0x15e4&&product==0x0079)found=true;IOObjectRelease(service);if(found)break;}IOObjectRelease(iterator);return found;}
-static void publish_connection_state(void){bool connected=ns6_connected();bool previous=atomic_exchange_explicit(&device_present,connected,memory_order_acq_rel);if(previous==connected||!host)return;AudioObjectPropertyAddress plugin_change={kAudioPlugInPropertyDeviceList,kAudioObjectPropertyScopeGlobal,kAudioObjectPropertyElementMain};host->PropertiesChanged(host,kAudioObjectPlugInObject,1,&plugin_change);AudioObjectPropertyAddress device_change={kAudioDevicePropertyDeviceIsAlive,kAudioObjectPropertyScopeGlobal,kAudioObjectPropertyElementMain};host->PropertiesChanged(host,DEVICE_ID,1,&device_change);}
+static void publish_connection_state(void){
+    bool connected=ns6_connected();
+    if(!connected&&atomic_load_explicit(&device_present,memory_order_acquire)){
+        /* USB enumeration can briefly lose the device while CoreAudio and the
+           NS6 interfaces settle after boot. Don't withdraw the HAL device on
+           one transient negative registry query. */
+        const struct timespec settle={0,250000000};nanosleep(&settle,NULL);
+        connected=ns6_connected();
+    }
+    bool previous=atomic_exchange_explicit(&device_present,connected,memory_order_acq_rel);
+    if(previous==connected)return;
+    os_log(OS_LOG_DEFAULT,"Numark NS6 USB presence changed: %{public}s (confirmed)",connected?"connected":"disconnected");
+    if(!host)return;
+    AudioObjectPropertyAddress plugin_change={kAudioPlugInPropertyDeviceList,kAudioObjectPropertyScopeGlobal,kAudioObjectPropertyElementMain};
+    host->PropertiesChanged(host,kAudioObjectPlugInObject,1,&plugin_change);
+    AudioObjectPropertyAddress device_change={kAudioDevicePropertyDeviceIsAlive,kAudioObjectPropertyScopeGlobal,kAudioObjectPropertyElementMain};
+    host->PropertiesChanged(host,DEVICE_ID,1,&device_change);
+}
 static void usb_changed(void *reference,io_iterator_t iterator){(void)reference;io_service_t service;while((service=IOIteratorNext(iterator)))IOObjectRelease(service);publish_connection_state();}
 static void *usb_monitor_thread(void *unused){(void)unused;usb_notifications=IONotificationPortCreate(kIOMainPortDefault);if(!usb_notifications)return NULL;CFRunLoopAddSource(CFRunLoopGetCurrent(),IONotificationPortGetRunLoopSource(usb_notifications),kCFRunLoopDefaultMode);if(IOServiceAddMatchingNotification(usb_notifications,kIOFirstMatchNotification,IOServiceMatching("IOUSBHostDevice"),usb_changed,NULL,&usb_added)==KERN_SUCCESS)usb_changed(NULL,usb_added);if(IOServiceAddMatchingNotification(usb_notifications,kIOTerminatedNotification,IOServiceMatching("IOUSBHostDevice"),usb_changed,NULL,&usb_removed)==KERN_SUCCESS)usb_changed(NULL,usb_removed);CFRunLoopRun();return NULL;}
 static void monitor_usb(void){pthread_t thread;if(pthread_create(&thread,NULL,usb_monitor_thread,NULL)==0)pthread_detach(thread);}
@@ -63,11 +80,16 @@ static bool ns6_is_default_output(void){
 }
 static void *default_output_monitor_thread(void *unused){
     (void)unused;const struct timespec delay={0,500000000};
+    bool previous_selected=false,first_check=true;
     for(;;){
         bool selected=atomic_load_explicit(&device_present,memory_order_acquire)&&ns6_is_default_output();
         pthread_mutex_lock(&stream_lock);
         atomic_store_explicit(&default_output_selected,selected,memory_order_release);
         atomic_store_explicit(&default_route_known,true,memory_order_release);
+        if(first_check||selected!=previous_selected){
+            os_log(OS_LOG_DEFAULT,"Numark NS6 default output route: %{public}s (USB present: %{public}s)",selected?"selected":"not selected",atomic_load_explicit(&device_present,memory_order_acquire)?"yes":"no");
+            first_check=false;previous_selected=selected;
+        }
         if(selected&&!transport_open){
             if(ns6_usb_start()){
                 transport_open=true;ns6_usb_set_paused(true);
