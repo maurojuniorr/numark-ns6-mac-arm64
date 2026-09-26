@@ -4,7 +4,8 @@ import IOKit
 
 private let vendorID: UInt16 = 0x15e4
 private let productID: UInt16 = 0x0079
-private let driverVersion = "0.1.0"
+private let driverVersion = "0.2.0"
+private let driverDeveloper = "Mauro Junior (@maurojuniorr)"
 
 private func usbConnected() -> Bool {
     var iterator: io_iterator_t = 0
@@ -61,13 +62,14 @@ final class StatusController: NSViewController {
 
         let rows = [
             ("Device", "Numark NS6"),
-            ("Inputs", "Not implemented"),
-            ("Outputs", "4"),
+            ("Audio Inputs", "Not implemented"),
+            ("Audio Outputs", "4"),
+            ("MIDI Input", "CoreMIDI bridge"),
             ("Clock Rate", "44.1 kHz"),
             ("Word Length", "24-bit packed"),
             ("Driver Version", driverVersion),
-            ("Driver Developer", "Mauro Junior / community"),
-            ("Firmware Version", "Not queried")
+            ("Driver Developer", driverDeveloper),
+            ("Firmware Version", "Unavailable (vendor query pending)")
         ]
         let details = NSStackView()
         details.orientation = .vertical
@@ -136,7 +138,7 @@ final class StatusController: NSViewController {
         statusLabel.stringValue = ready ? "CONNECTED — audio driver ready" : (connected ? "CONNECTED — waiting for audio driver" : "NO DEVICE")
         stateDot.layer?.backgroundColor = (ready ? NSColor.systemGreen : (connected ? NSColor.systemOrange : NSColor.systemRed)).cgColor
         valueLabels[0].stringValue = connected ? "Numark NS6 (USB)" : "—"
-        valueLabels[6].stringValue = connected ? "Not queried" : "—"
+        valueLabels[8].stringValue = connected ? "Unavailable (vendor query pending)" : "—"
     }
 
     @objc private func closeWindow() { view.window?.close() }
@@ -147,7 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = StatusController()
         let window = NSWindow(contentViewController: controller)
         window.title = "Numark NS6 Status"
-        window.setContentSize(NSSize(width: 410, height: 475))
+        window.setContentSize(NSSize(width: 430, height: 510))
         window.styleMask = [.titled, .closable, .miniaturizable]
         window.center()
         window.makeKeyAndOrderFront(nil)
