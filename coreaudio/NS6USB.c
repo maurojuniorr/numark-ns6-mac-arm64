@@ -7,6 +7,7 @@
 #include <IOKit/usb/IOUSBLib.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <os/log.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -99,7 +100,7 @@ static IOReturn activate_controller(void){
     }
     return kIOReturnNotFound;
 }
-static bool usb_failure(const char *operation,IOReturn result){fprintf(stderr,"Numark NS6 %s failed: 0x%08x\n",operation,result);return false;}
+static bool usb_failure(const char *operation,IOReturn result){fprintf(stderr,"Numark NS6 %s failed: 0x%08x\n",operation,result);os_log_error(OS_LOG_DEFAULT,"Numark NS6 %{public}s failed: 0x%08x",operation,(unsigned)result);return false;}
 static IOReturn control(UInt8 type,UInt8 request,UInt16 value,UInt16 index,void *data,UInt16 length){
     IOUSBDevRequest r={type,request,value,index,length,data,0}; return (*interface)->ControlRequest(interface,0,&r);
 }
@@ -118,6 +119,7 @@ static void fill(struct slot *slot){
 static void submit(struct slot *slot);
 static void request_recovery(const char *operation,IOReturn result){
     fprintf(stderr,"Numark NS6 %s failed: 0x%08x; restarting USB audio stream\n",operation,result);
+    os_log_error(OS_LOG_DEFAULT,"Numark NS6 %{public}s failed: 0x%08x; restarting USB audio stream",operation,(unsigned)result);
     atomic_store_explicit(&recovery_requested,true,memory_order_release);
     if(run_loop)CFRunLoopWakeUp(run_loop);
 }
@@ -128,6 +130,7 @@ static void complete(void *reference,IOReturn status,void *argument){
     if(status!=kIOReturnSuccess){
         ++slot->consecutive_errors;
         fprintf(stderr,"Numark NS6 isochronous completion failed: 0x%08x (%u consecutive)\n",status,slot->consecutive_errors);
+        os_log_error(OS_LOG_DEFAULT,"Numark NS6 isochronous completion failed: 0x%08x (%u consecutive)",(unsigned)status,slot->consecutive_errors);
         if(slot->consecutive_errors>=3)request_recovery("isochronous transfer",status);
         else submit(slot);
         return;
@@ -141,9 +144,9 @@ static void submit(struct slot *slot){
     if(result!=kIOReturnSuccess)request_recovery("submit isochronous transfer",result);
 }
 static bool initialize(void){
-    unsigned char capability[64]={0},rate[3]={0x44,0xac,0}; interface=open_interface(); if(!interface)return false;
+    unsigned char capability[64]={0},rate[3]={0x44,0xac,0}; interface=open_interface(); if(!interface){os_log_error(OS_LOG_DEFAULT,"Numark NS6 could not find USB interface 0");return false;}
     IOReturn result=(*interface)->USBInterfaceOpenSeize(interface); if(result!=kIOReturnSuccess)return usb_failure("open interface",result);
-    auxiliary_interface=open_interface_once(1); if(!auxiliary_interface)return false;
+    auxiliary_interface=open_interface_once(1); if(!auxiliary_interface){os_log_error(OS_LOG_DEFAULT,"Numark NS6 could not find USB interface 1");return false;}
     result=(*auxiliary_interface)->USBInterfaceOpenSeize(auxiliary_interface); if(result!=kIOReturnSuccess)return usb_failure("open auxiliary interface",result);
     result=(*auxiliary_interface)->SetAlternateInterface(auxiliary_interface,1); if(result!=kIOReturnSuccess)return usb_failure("select auxiliary alternate setting",result);
     result=(*interface)->CreateInterfaceAsyncEventSource(interface,&source); if(result!=kIOReturnSuccess||!source)return usb_failure("create async source",result);
@@ -181,8 +184,9 @@ static void *worker(void *unused){
         if(first_attempt){
             pthread_mutex_lock(&lock); initialized=ready; if(!ready)atomic_store(&running,false); pthread_cond_broadcast(&changed); pthread_mutex_unlock(&lock);
             first_attempt=false;
-            if(!ready){cleanup();break;}
+            if(!ready){os_log_error(OS_LOG_DEFAULT,"Numark NS6 initial USB audio setup failed");cleanup();break;}
         }else if(!ready){
+            os_log_error(OS_LOG_DEFAULT,"Numark NS6 USB audio recovery setup failed; retrying in 500 ms");
             cleanup();
             if(atomic_load_explicit(&running,memory_order_acquire))nanosleep(&recovery_delay,NULL);
             continue;
@@ -195,6 +199,7 @@ static void *worker(void *unused){
         cleanup();
         if(atomic_load_explicit(&running,memory_order_acquire)){
             fprintf(stderr,"Numark NS6 attempting automatic USB audio recovery\n");
+            os_log(OS_LOG_DEFAULT,"Numark NS6 attempting automatic USB audio recovery");
             nanosleep(&recovery_delay,NULL);
         }
     }
