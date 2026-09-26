@@ -67,6 +67,23 @@ static void submit_read(struct read_slot *slot);
 static void read_complete(void *reference,IOReturn status,void *argument){struct read_slot *slot=reference;if(status==kIOReturnSuccess){UInt32 length=(UInt32)(uintptr_t)argument;if(length>MIDI_PACKET_BYTES)length=MIDI_PACKET_BYTES;publish_packet(slot->data,length);}if(atomic_load(&running))submit_read(slot);}
 static void submit_read(struct read_slot *slot){if((*usb)->ReadPipeAsync(usb,input_pipe,slot->data,sizeof(slot->data),read_complete,slot)!=kIOReturnSuccess&&atomic_load(&running))fprintf(stderr,"Numark NS6 MIDI input unavailable\n");}
 static void *write_worker(void *unused){(void)unused;for(;;){struct write_packet packet;pthread_mutex_lock(&queue_lock);while(head==tail&&atomic_load(&running))pthread_cond_wait(&queue_ready,&queue_lock);if(head==tail&&!atomic_load(&running)){pthread_mutex_unlock(&queue_lock);break;}packet=queue[head];head=(head+1)%MIDI_WRITE_QUEUE;pthread_mutex_unlock(&queue_lock);IOReturn result=(*usb)->WritePipe(usb,output_pipe,packet.data,sizeof(packet.data));if(result!=kIOReturnSuccess)os_log_error(OS_LOG_DEFAULT,"Numark NS6 MIDI output failed: %{public}u",(unsigned)result);}return NULL;}
+static void blackout_controller(void){
+    if(!usb||!output_pipe)return;
+    unsigned char packet[MIDI_PACKET_BYTES];
+    unsigned used=0;
+    memset(packet,MIDI_IDLE_BYTE,sizeof(packet));
+    for(unsigned channel=0;channel<=4;++channel){
+        for(unsigned cc=0;cc<=0x51;++cc){
+            packet[used++]=0xb0+channel;packet[used++]=cc;packet[used++]=0;
+            if(used==39){packet[41]=MIDI_TERMINATOR;(*usb)->WritePipe(usb,output_pipe,packet,sizeof(packet));memset(packet,MIDI_IDLE_BYTE,sizeof(packet));used=0;}
+        }
+        for(unsigned note=0;note<=0x50;++note){
+            packet[used++]=0x80+channel;packet[used++]=note;packet[used++]=0;
+            if(used==39){packet[41]=MIDI_TERMINATOR;(*usb)->WritePipe(usb,output_pipe,packet,sizeof(packet));memset(packet,MIDI_IDLE_BYTE,sizeof(packet));used=0;}
+        }
+    }
+    if(used){packet[41]=MIDI_TERMINATOR;(*usb)->WritePipe(usb,output_pipe,packet,sizeof(packet));}
+}
 static void *receive_worker(void *unused){(void)unused;unsigned char data[41];while(atomic_load(&running)){ssize_t length=recv(inbound_socket,data,sizeof(data),0);if(length>0)enqueue(data,(unsigned)length);}return NULL;}
 static bool open_sockets(void){
     inbound_socket=socket(AF_INET,SOCK_DGRAM,0);outbound_socket=socket(AF_INET,SOCK_DGRAM,0);if(inbound_socket<0||outbound_socket<0)return false;
@@ -98,6 +115,10 @@ void ns6_midi_stop(void){
     if(usb&&input_pipe)(*usb)->AbortPipe(usb,input_pipe);
     if(inbound_socket>=0){close(inbound_socket);inbound_socket=-1;}
     if(writer_started){pthread_join(writer,NULL);writer_started=false;}
+    /* The HAL still owns the USB interface here. Do the blackout before the
+       audio shutdown releases it; Mixxx may already have destroyed its MIDI
+       endpoint and cannot be relied on to call the mapping shutdown hook. */
+    blackout_controller();
     if(receiver_started){pthread_join(receiver,NULL);receiver_started=false;}
     if(outbound_socket>=0){close(outbound_socket);outbound_socket=-1;}
     usb=NULL;input_pipe=output_pipe=0;
