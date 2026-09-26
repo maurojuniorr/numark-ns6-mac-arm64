@@ -92,9 +92,13 @@ static void *default_output_monitor_thread(void *unused){
         }
         if(selected&&!transport_open){
             if(ns6_usb_start()){
-                transport_open=true;ns6_usb_set_paused(true);
-                os_log(OS_LOG_DEFAULT,"Numark NS6 is the default output; USB audio clock started in silent standby");
+                transport_open=true;
+                bool paused=atomic_load_explicit(&io_clients,memory_order_acquire)==0;
+                ns6_usb_set_paused(paused);
+                os_log(OS_LOG_DEFAULT,"Numark NS6 is the default output; USB audio clock started (%{public}s)",paused?"silent standby":"active audio");
             }else os_log_error(OS_LOG_DEFAULT,"Numark NS6 is the default output but silent standby initialization failed");
+        }else if(selected&&transport_open&&atomic_load_explicit(&io_clients,memory_order_acquire)){
+            ns6_usb_set_paused(false);
         }else if(!selected&&transport_open&&!atomic_load_explicit(&io_clients,memory_order_acquire)){
             ns6_usb_stop();transport_open=false;
             os_log(OS_LOG_DEFAULT,"Numark NS6 is no longer the default output; USB audio clock stopped");
@@ -176,18 +180,22 @@ static OSStatus get_property(AudioServerPlugInDriverRef d,AudioObjectID object,p
 static OSStatus set_property(AudioServerPlugInDriverRef d,AudioObjectID o,pid_t p,const AudioObjectPropertyAddress*a,UInt32 q,const void*x,UInt32 n,const void*v){(void)d;(void)o;(void)p;(void)a;(void)q;(void)x;(void)n;(void)v;return kAudioHardwareUnsupportedOperationError;}
 
 static OSStatus start_io(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32 client){
-    (void)d;(void)client;
+    (void)d;
     if(object!=DEVICE_ID)return kAudioHardwareBadObjectError;
     if(!atomic_load(&device_present)){os_log_error(OS_LOG_DEFAULT,"Numark NS6 start_io refused: USB device absent");return kAudioHardwareNotRunningError;}
     pthread_mutex_lock(&stream_lock);
-    if(atomic_load_explicit(&io_clients,memory_order_acquire)==0){
-        if(!transport_open&&!ns6_usb_start()){pthread_mutex_unlock(&stream_lock);os_log_error(OS_LOG_DEFAULT,"Numark NS6 start_io failed: USB transport initialization failed");return kAudioHardwareUnspecifiedError;}
-        transport_open=true;
-        ns6_usb_set_paused(false);
+    unsigned clients=atomic_load_explicit(&io_clients,memory_order_acquire);
+    if(!transport_open&&!ns6_usb_start()){pthread_mutex_unlock(&stream_lock);os_log_error(OS_LOG_DEFAULT,"Numark NS6 start_io failed: USB transport initialization failed");return kAudioHardwareUnspecifiedError;}
+    transport_open=true;
+    /* CoreAudio can restart a device while another client still holds an
+       I/O context. Always clear silent-pause on StartIO, not only on the
+       transition from zero clients. */
+    ns6_usb_set_paused(false);
+    if(clients==0){
         anchor_host_time=mach_absolute_time();++seed;atomic_store(&enqueue_failures,0);
-        os_log(OS_LOG_DEFAULT,"Numark NS6 audio stream resumed (sample rate %.0f, client %u)",SAMPLE_RATE,client);
     }
     atomic_fetch_add_explicit(&io_clients,1,memory_order_release);
+    os_log(OS_LOG_DEFAULT,"Numark NS6 audio stream resumed (sample rate %.0f, client %u; %u prior clients)",SAMPLE_RATE,client,clients);
     pthread_mutex_unlock(&stream_lock);
     return 0;
 }
