@@ -26,22 +26,36 @@ static void send_to_driver(const unsigned char *data,size_t length){
 }
 static void receive_from_application(const MIDIPacketList *list,void *reference,void *connection){
     (void)reference;(void)connection;
+    unsigned char report[41];
+    size_t used=0;
     const MIDIPacket *packet=list->packet;
     for(UInt32 index=0;index<list->numPackets;++index,packet=MIDIPacketNext(packet)){
         UInt16 offset=0;
         while(offset<packet->length){
             unsigned char status=packet->data[offset];
             if(status==0xf0){
+                /* Preserve ordering: drain any short MIDI messages first. */
+                send_to_driver(report,used);
+                used=0;
                 UInt16 remaining=packet->length-offset;
                 send_to_driver(packet->data+offset,remaining>41?41:remaining);
                 break;
             }
             unsigned length=midi_length(status);
             if(!length||offset+length>packet->length){++offset;continue;}
-            send_to_driver(packet->data+offset,length);
+            /* The NS6 accepts up to 41 bytes of MIDI payload in its fixed
+               42-byte USB report. Batching prevents the close-time LED
+               blackout from overflowing the driver's write queue. */
+            if(used+length>sizeof(report)){
+                send_to_driver(report,used);
+                used=0;
+            }
+            memcpy(report+used,packet->data+offset,length);
+            used+=length;
             offset+=length;
         }
     }
+    send_to_driver(report,used);
 }
 static bool open_socket(void){
     socket_fd=socket(AF_INET,SOCK_DGRAM,0);
