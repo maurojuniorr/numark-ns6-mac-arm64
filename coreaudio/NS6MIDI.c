@@ -70,19 +70,22 @@ static void *write_worker(void *unused){(void)unused;for(;;){struct write_packet
 static void blackout_controller(void){
     if(!usb||!output_pipe)return;
     unsigned char packet[MIDI_PACKET_BYTES];
-    unsigned used=0;
-    memset(packet,MIDI_IDLE_BYTE,sizeof(packet));
-    for(unsigned channel=0;channel<=4;++channel){
-        for(unsigned cc=0;cc<=0x51;++cc){
-            packet[used++]=0xb0+channel;packet[used++]=cc;packet[used++]=0;
-            if(used==39){packet[41]=MIDI_TERMINATOR;(*usb)->WritePipe(usb,output_pipe,packet,sizeof(packet));memset(packet,MIDI_IDLE_BYTE,sizeof(packet));used=0;}
+    const struct timespec settle={.tv_nsec=2000000};
+    for(unsigned pass=0;pass<2;++pass){
+        unsigned used=0;
+        memset(packet,MIDI_IDLE_BYTE,sizeof(packet));
+        for(unsigned channel=0;channel<=4;++channel){
+            for(unsigned cc=0;cc<=0x51;++cc){
+                packet[used++]=0xb0+channel;packet[used++]=cc;packet[used++]=0;
+                if(used==39){packet[41]=MIDI_TERMINATOR;(*usb)->WritePipe(usb,output_pipe,packet,sizeof(packet));nanosleep(&settle,NULL);memset(packet,MIDI_IDLE_BYTE,sizeof(packet));used=0;}
+            }
+            for(unsigned note=0;note<=0x50;++note){
+                packet[used++]=0x80+channel;packet[used++]=note;packet[used++]=0;
+                if(used==39){packet[41]=MIDI_TERMINATOR;(*usb)->WritePipe(usb,output_pipe,packet,sizeof(packet));nanosleep(&settle,NULL);memset(packet,MIDI_IDLE_BYTE,sizeof(packet));used=0;}
+            }
         }
-        for(unsigned note=0;note<=0x50;++note){
-            packet[used++]=0x80+channel;packet[used++]=note;packet[used++]=0;
-            if(used==39){packet[41]=MIDI_TERMINATOR;(*usb)->WritePipe(usb,output_pipe,packet,sizeof(packet));memset(packet,MIDI_IDLE_BYTE,sizeof(packet));used=0;}
-        }
+        if(used){packet[41]=MIDI_TERMINATOR;(*usb)->WritePipe(usb,output_pipe,packet,sizeof(packet));nanosleep(&settle,NULL);}
     }
-    if(used){packet[41]=MIDI_TERMINATOR;(*usb)->WritePipe(usb,output_pipe,packet,sizeof(packet));}
 }
 static void *receive_worker(void *unused){(void)unused;unsigned char data[41];while(atomic_load(&running)){ssize_t length=recv(inbound_socket,data,sizeof(data),0);if(length>0)enqueue(data,(unsigned)length);}return NULL;}
 static bool open_sockets(void){
