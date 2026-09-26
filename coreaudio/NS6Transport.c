@@ -12,6 +12,10 @@ static _Atomic uint32_t write_position,read_position;
 
 static void pack24(unsigned char *out,int32_t sample){out[0]=(unsigned char)sample;out[1]=(unsigned char)(sample>>8);out[2]=(unsigned char)(sample>>16);}
 void ns6_transport_reset(void){atomic_store(&read_position,0);atomic_store(&write_position,0);}
+void ns6_transport_discard(void){
+    uint32_t write=atomic_load_explicit(&write_position,memory_order_acquire);
+    atomic_store_explicit(&read_position,write,memory_order_release);
+}
 UInt32 ns6_transport_available(void){
     uint32_t read=atomic_load_explicit(&read_position,memory_order_acquire);
     uint32_t write=atomic_load_explicit(&write_position,memory_order_acquire);

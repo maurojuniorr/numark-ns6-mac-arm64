@@ -34,6 +34,7 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
 static atomic_bool running;
 static atomic_bool recovery_requested;
+static atomic_bool output_paused=true;
 static atomic_uint_fast64_t completed_transfers;
 static atomic_uint_fast64_t underrun_frames;
 static bool thread_created, initialized;
@@ -113,6 +114,12 @@ static void fill(struct slot *slot){
         fraction+=RATE;
         unsigned frames=(unsigned)(fraction/8000); fraction%=8000;
         slot->frames[packet].frReqCount=(UInt16)(frames*FRAME_BYTES); slot->frames[packet].frActCount=0; slot->frames[packet].frStatus=0;
+        if(atomic_load_explicit(&output_paused,memory_order_acquire)){
+            ns6_transport_discard();
+            memset(output,0,frames*FRAME_BYTES);
+            output+=frames*FRAME_BYTES;
+            continue;
+        }
         UInt32 received=ns6_transport_dequeue(output,frames);
         if(received<frames){
             uint64_t missing=frames-received;
@@ -218,13 +225,14 @@ static void *worker(void *unused){
 }
 bool ns6_usb_start(void){
     pthread_mutex_lock(&lock); if(thread_created){bool result=initialized;pthread_mutex_unlock(&lock);return result;}
-    fraction=0; initialized=false; atomic_store(&completed_transfers,0); atomic_store(&underrun_frames,0); ns6_transport_reset(); atomic_store(&recovery_requested,false); atomic_store(&running,true);
+    fraction=0; initialized=false; atomic_store(&completed_transfers,0); atomic_store(&underrun_frames,0); ns6_transport_reset(); atomic_store(&output_paused,true); atomic_store(&recovery_requested,false); atomic_store(&running,true);
     if(pthread_create(&thread,NULL,worker,NULL)!=0){atomic_store(&running,false);pthread_mutex_unlock(&lock);return false;}
     thread_created=true; while(!initialized&&atomic_load(&running))pthread_cond_wait(&changed,&lock); bool result=initialized; pthread_mutex_unlock(&lock);
     if(!result){pthread_join(thread,NULL);pthread_mutex_lock(&lock);thread_created=false;pthread_mutex_unlock(&lock);} return result;
 }
 void ns6_usb_stop(void){
-    pthread_mutex_lock(&lock); if(!thread_created){pthread_mutex_unlock(&lock);return;} atomic_store(&running,false); if(run_loop)CFRunLoopWakeUp(run_loop); pthread_mutex_unlock(&lock);
+    pthread_mutex_lock(&lock); if(!thread_created){pthread_mutex_unlock(&lock);return;} atomic_store(&output_paused,true); atomic_store(&running,false); if(run_loop)CFRunLoopWakeUp(run_loop); pthread_mutex_unlock(&lock);
     pthread_join(thread,NULL); pthread_mutex_lock(&lock); thread_created=false; initialized=false; pthread_mutex_unlock(&lock);
 }
+void ns6_usb_set_paused(bool paused){atomic_store_explicit(&output_paused,paused,memory_order_release);}
 void ns6_usb_submit_pcm(const uint8_t *pcm24,uint32_t frames){(void)pcm24;(void)frames;}

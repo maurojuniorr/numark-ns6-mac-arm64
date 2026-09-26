@@ -118,10 +118,10 @@ static OSStatus start_io(AudioServerPlugInDriverRef d,AudioObjectID object,UInt3
     if(object!=DEVICE_ID)return kAudioHardwareBadObjectError;
     if(!atomic_load(&device_present)){os_log_error(OS_LOG_DEFAULT,"Numark NS6 start_io refused: USB device absent");return kAudioHardwareNotRunningError;}
     if(io_clients==0){
-        ns6_transport_reset();
         if(!ns6_usb_start()){os_log_error(OS_LOG_DEFAULT,"Numark NS6 start_io failed: USB transport initialization failed");return kAudioHardwareUnspecifiedError;}
+        ns6_usb_set_paused(false);
         anchor_host_time=mach_absolute_time();++seed;atomic_store(&enqueue_failures,0);
-        os_log(OS_LOG_DEFAULT,"Numark NS6 audio stream started (sample rate %.0f, client %u)",SAMPLE_RATE,client);
+        os_log(OS_LOG_DEFAULT,"Numark NS6 audio stream resumed (sample rate %.0f, client %u)",SAMPLE_RATE,client);
     }
     ++io_clients;
     return 0;
@@ -129,7 +129,7 @@ static OSStatus start_io(AudioServerPlugInDriverRef d,AudioObjectID object,UInt3
 static OSStatus stop_io(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32 client){
     (void)d;
     if(object!=DEVICE_ID)return kAudioHardwareBadObjectError;
-    if(io_clients&&--io_clients==0){os_log(OS_LOG_DEFAULT,"Numark NS6 audio stream stopping (client %u)",client);ns6_usb_stop();}
+    if(io_clients&&--io_clients==0){ns6_usb_set_paused(true);ns6_transport_discard();os_log(OS_LOG_DEFAULT,"Numark NS6 audio paused; keeping USB clock active with silence (client %u)",client);}
     return 0;
 }
 static OSStatus zero_timestamp(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32 client,Float64 *sample,UInt64 *host_time,UInt64 *out_seed){(void)d;(void)client;if(object!=DEVICE_ID||!sample||!host_time||!out_seed)return kAudioHardwareIllegalOperationError;UInt64 now=mach_absolute_time();double nanos=(double)(now-anchor_host_time)*timebase.numer/timebase.denom;UInt64 frame=(UInt64)(nanos*SAMPLE_RATE/1e9);frame=(frame/BUFFER_FRAMES)*BUFFER_FRAMES;double ticks=(double)frame*1e9/SAMPLE_RATE*timebase.denom/timebase.numer;*sample=(Float64)frame;*host_time=anchor_host_time+(UInt64)ticks;*out_seed=seed;return 0;}
