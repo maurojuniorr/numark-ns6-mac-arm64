@@ -98,6 +98,7 @@ controller.
   findings helped validate the host-identification SysEx handshake
   (`0x50`/`0x51`/`0x60`), investigate the `0x81` clock-feedback reports, and
   compare isochronous audio packet formats. He also contributed related
-  analysis in a pull request to the Linux project. This macOS driver builds
-  on that research alongside the Linux project's earlier work; it does not
-  copy his separate prototype wholesale.
+  analysis in [pull request #4](https://github.com/maurojuniorr/numark-ns6-linux/pull/4)
+  to the Linux project. This macOS driver builds on that research alongside
+  the Linux project's earlier work; it does not copy his separate prototype
+  wholesale.
