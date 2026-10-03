@@ -2,27 +2,32 @@ SDK := $(shell xcrun --show-sdk-path)
 CFLAGS := -Wall -Wextra -Werror -arch arm64 -isysroot $(SDK) -mmacosx-version-min=15.0 -fPIC
 BUILD := build/NumarkNS6.driver/Contents
 APP := build/NumarkNS6Status.app
-VERSION ?= 0.2.0
+VERSION ?= 0.2.50
 PACKAGE_ID := io.github.maurojuniorr.numark-ns6
 PACKAGE_ROOT := build/package-root
 DIST := dist
+SWIFT_MODULE_CACHE := /tmp/ns6-macos-swift-module-cache
 all: $(BUILD)/MacOS/NumarkNS6 $(BUILD)/Info.plist app midi-bridge
-$(BUILD)/MacOS/NumarkNS6: NS6HAL.c NS6Transport.c NS6USB.c NS6MIDI.c
+$(BUILD)/MacOS/NumarkNS6: NS6HAL.c NS6Transport.c NS6USB.c NS6MIDI.c NS6MIDIParser.h
 	mkdir -p $(BUILD)/MacOS
 	$(CC) $(CFLAGS) -bundle NS6HAL.c NS6Transport.c NS6USB.c NS6MIDI.c -o $@ -framework CoreAudio -framework CoreFoundation -framework IOKit
 $(BUILD)/Info.plist: Info.plist
 	mkdir -p $(BUILD)
 	cp $< $@
-app: $(APP)/Contents/MacOS/NumarkNS6Status $(APP)/Contents/MacOS/NumarkNS6MIDIBridge $(APP)/Contents/Info.plist $(APP)/Contents/Resources/NS6Status.icns
+app: $(APP)/Contents/MacOS/NumarkNS6Status $(APP)/Contents/MacOS/NumarkNS6MIDIBridge $(APP)/Contents/Info.plist $(APP)/Contents/PkgInfo $(APP)/Contents/Resources/NS6Status.icns
 $(APP)/Contents/MacOS/NumarkNS6Status: status-app/NS6Status.swift
 	mkdir -p $(APP)/Contents/MacOS
-	swiftc -O -target arm64-apple-macosx15.0 $< -o $@ -framework AppKit -framework CoreAudio -framework IOKit
+	mkdir -p $(SWIFT_MODULE_CACHE)
+	swiftc -O -module-cache-path $(SWIFT_MODULE_CACHE) -target arm64-apple-macosx15.0 $< -o $@ -framework AppKit -framework CoreAudio -framework IOKit
 $(APP)/Contents/MacOS/NumarkNS6MIDIBridge: build/NumarkNS6MIDIBridge
 	mkdir -p $(APP)/Contents/MacOS
 	cp $< $@
 $(APP)/Contents/Info.plist: status-app/Info.plist
 	mkdir -p $(APP)/Contents
 	cp $< $@
+$(APP)/Contents/PkgInfo:
+	mkdir -p $(APP)/Contents
+	printf 'APPL????' > $@
 $(APP)/Contents/Resources/NS6Status.icns: status-app/NS6Status.icns
 	mkdir -p $(APP)/Contents/Resources
 	cp $< $@
@@ -32,6 +37,10 @@ clean:
 usb-test: NS6USBTest.c NS6Transport.c NS6USB.c NS6MIDI.c
 	mkdir -p build
 	$(CC) $(CFLAGS) NS6USBTest.c NS6Transport.c NS6USB.c NS6MIDI.c -o build/ns6-usb-test -framework CoreAudio -framework CoreFoundation -framework IOKit -lm
+
+midi-parser-test: NS6MIDIParserTest.c NS6MIDIParser.h
+	$(CC) -Wall -Wextra -Werror NS6MIDIParserTest.c -o build/ns6-midi-parser-test
+	build/ns6-midi-parser-test
 
 midi-bridge: build/NumarkNS6MIDIBridge
 build/NumarkNS6MIDIBridge: NS6MIDIBridge.c
@@ -55,6 +64,7 @@ install: sign
 	sudo ditto build/NumarkNS6.driver /Library/Audio/Plug-Ins/HAL/NumarkNS6M1.driver
 	sudo ditto $(APP) '/Applications/Numark NS6 Status.app'
 	sudo cp launch-agents/io.github.maurojuniorr.numark-ns6-midi-bridge.plist /Library/LaunchAgents/
+	-sudo killall -m '^Core Audio Driver \(NumarkNS6M1\.driver\)$$'
 	sudo killall coreaudiod
 
 package: sign
@@ -68,4 +78,5 @@ package: sign
 
 uninstall:
 	sudo rm -rf /Library/Audio/Plug-Ins/HAL/NumarkNS6M1.driver
+	-sudo killall -m '^Core Audio Driver \(NumarkNS6M1\.driver\)$$'
 	sudo killall coreaudiod

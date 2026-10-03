@@ -10,6 +10,12 @@ setting 1, uses `LowLatencyWriteIsochPipeAsync`, and produces a clean 44.1 kHz
 test tone through the NS6.
 
 The HAL plug-in publishes one 4-channel, 44.1 kHz Float32 output device. Its
+NS6 Status app selects the CoreAudio buffer size live among 49, 128, 192, 256, 512, and
+1024 frames, matching the choices shown in the original Windows NS6 panel. A
+change is requested through CoreAudio's device-configuration mechanism so
+clients can stop and restart their I/O around the new period. At 44.1 kHz,
+those sizes correspond to approximately 1.1, 2.9, 4.4, 5.8, 11.6, and
+23.2 ms per buffer. Its
 worker converts the CoreAudio mix to the packed 24-bit format used by the NS6.
 Channels 1/2 feed Master and channels 3/4 feed Headphones independently, so
 DJ software can route its main mix and cue mix separately.
@@ -26,6 +32,23 @@ NS6.
 
 The former Numark package included an Intel-only Ploytec kext. This project
 does not load or depend on it.
+
+## Audio glitch diagnostics
+
+The USB worker periodically logs transfer health, queued frames, underrun event
+and frame counts, largest underrun burst, isochronous packet errors, and short
+output packets. Underruns and packet faults also produce rate-limited detail
+messages when they occur. CoreAudio queue rejections are logged separately.
+After a glitch, collect the matching system log entries with:
+
+```sh
+log show --last 2h --style compact --predicate 'eventMessage CONTAINS[c] "Numark NS6"'
+```
+
+Record the glitch time as well; the timestamps let us compare the audio capture
+with the driver's queue and USB counters. The diagnostic reader also samples
+the optional USB feedback endpoint `0x81` on USB interface 1 and logs one-second
+windows of its 44/45-frame reports; it does not use those values to alter playback timing.
 
 ## Data path
 

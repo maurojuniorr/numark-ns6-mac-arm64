@@ -3,4 +3,6 @@ set -eu
 
 # The HAL plug-in is discovered by coreaudiod. Restarting this service makes
 # the newly installed bundle available immediately without a system reboot.
+/usr/bin/killall NumarkNS6Status >/dev/null 2>&1 || true
+/usr/bin/killall -m '^Core Audio Driver \(NumarkNS6M1\.driver\)$' >/dev/null 2>&1 || true
 /usr/bin/killall coreaudiod >/dev/null 2>&1 || true
