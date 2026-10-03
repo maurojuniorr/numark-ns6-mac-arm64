@@ -1,104 +1,148 @@
-# Numark NS6 on macOS
+# 🎧 Numark NS6 driver for Apple Silicon macOS
 
-Created and maintained by **Mauro Junior** ([maurojuniorr](https://github.com/maurojuniorr)).
+An independent driver project to keep the original Numark NS6 usable on modern
+Apple Silicon Macs. It provides four-channel audio playback through Core Audio,
+MIDI input and LED output through CoreMIDI, and a small status app for the
+device and active audio stream.
 
-This is the arm64 macOS implementation. The original Numark HAL bundles
-installed on some Macs are Intel-only and cannot load on Apple Silicon.
+The macOS implementation builds on the protocol and initialization work in
+[our Linux NS6 driver](https://github.com/maurojuniorr/numark-ns6-linux). That
+Linux project is also still in progress. This repository adapts that shared
+hardware knowledge to macOS; it is not a port of Numark's discontinued driver
+and is not an official Numark or Ploytec product.
 
-The Core Audio HAL owns the NS6 USB interfaces, runs the vendor initialization
-sequence, and publishes four playback channels at 44.1 kHz S24_3LE.
+> **Project status: experimental / alpha.** The driver has been exercised on
+> original NS6 hardware with Apple Silicon and macOS Sequoia, including
+> extended audio sessions. Compatibility and long-term behavior still need
+> testing across more systems and applications. Use it for testing and report
+> issues with logs and the macOS version.
 
-## Project status
+## 👨‍🔧 About the project
 
-This is an experimental, in-progress Apple Silicon driver derived from work on
-the still-incomplete Linux NS6 driver. It currently focuses on four-channel
-audio output and MIDI control through the companion CoreMIDI bridge; it is not
-an official Numark driver, and some behavior still needs broader hardware and
-long-duration testing. The NS6 feedback endpoint is monitored for diagnostics,
-but its reports do not yet control the audio clock.
+Created and maintained by **Mauro Junior** ([maurojuniorr](https://github.com/maurojuniorr)),
+DJ and software developer working to bring the original NS6 back to life on
+current Macs. The original Mac driver depended on an Intel-only Ploytec kernel
+extension; this project uses a userspace Core Audio HAL driver and does not
+require that legacy extension or changes to SIP.
 
-Audio capture is not currently exposed as a macOS input device. The separate
-USB descriptor probe under `tools/` is a read-only diagnostic utility; it is
-not part of the installer.
+The target is the original USB device, **VID `15e4`, PID `0079`**, on Apple
+Silicon Macs running macOS 15 or later.
 
-## MIDI
+## ✅ What works
 
-The HAL owns the USB session and sends MIDI over a local loopback socket to
-the companion **Numark NS6 MIDI Bridge**. The bridge runs in the logged-in
-user session and publishes two CoreMIDI endpoints:
+- **Four-channel audio output:** 44.1 kHz, packed 24-bit audio. Output channels
+  1–2 carry Master and channels 3–4 carry Headphones, so DJ software can route
+  both mixes independently.
+- **MIDI controls:** the driver reads the NS6's packed USB MIDI messages and
+  publishes a **Numark NS6** CoreMIDI input. DJ software can send MIDI back to
+  the controller's LEDs through the matching CoreMIDI output.
+- **NS6 Status app:** reports USB connection and audio format details,
+  and the active audio flow when available. It also lets you choose the USB
+  startup pre-buffer and apply the change by restarting the audio transport.
+- **Audio recovery and diagnostics:** the USB transport can recover from
+  transient device/interface loss and logs transfer health, queue underruns,
+  packet errors, and feedback-endpoint readings for troubleshooting.
 
-- **Numark NS6** input receives the controller's packed 42-byte USB MIDI
-  messages through endpoint `0x83`.
-- **Numark NS6** output accepts Note/CC messages from DJ software and sends
-  them to endpoint `0x04` for the controller LEDs.
+The status app's startup pre-buffer is a driver-side USB setting. It does not
+set or limit the audio buffer selected inside Mixxx or another audio
+application. The active-flow latency shown by Status is measured separately.
 
-Only the HAL claims the NS6 USB interface; the bridge never opens it. This
-keeps MIDI and audio in one USB session while ensuring the endpoints are
-visible to Mixxx and other desktop applications.
+## 🏗️ How the driver is put together
 
-The installer registers the bridge as a LaunchAgent, so it starts with macOS.
-After installing, select **Numark NS6** in Mixxx. Its input and output ports
-share that name so Mixxx pairs them automatically.
+The Core Audio HAL driver owns the NS6 USB session and sends playback over its
+isochronous audio endpoint. Audio is queued outside Core Audio's real-time
+callback, converted to the packed format used by the controller, and sent in
+whole-frame USB packets. MIDI is carried over the same USB session and
+forwarded to a companion process, which publishes the CoreMIDI ports in the
+logged-in user session. This lets audio and MIDI share the device without two
+processes competing to open it.
 
-## Hardware probe
+The USB audio schedule uses a fractional frame accumulator to alternate
+five- and six-frame packets, averaging 44,100 frames per second. Endpoint
+`0x81` is sampled for diagnostics; its readings are **not yet used** to adjust
+playback timing.
 
-Install the build dependencies once:
+## ⚠️ Current limitations
+
+- **Audio capture is not implemented** as a macOS input device. The NS6's two
+  hardware inputs are not available to applications through this driver.
+- The `0x81` feedback endpoint is monitored, but adaptive clock correction has
+  not been implemented.
+- The firmware version is not queried from the controller yet; NS6 Status
+  reports it as unavailable.
+- The separate `tools/ns6-probe` program only reads USB descriptors. It is a
+  development diagnostic, is not required by the driver, and is not included
+  in the installer.
+- The installer package is unsigned and not notarized. macOS may require you
+  to approve or explicitly open it.
+
+## 📥 Install
+
+Download the latest **NumarkNS6 `.pkg`** from
+[GitHub Releases](https://github.com/maurojuniorr/numark-ns6-mac-arm64/releases).
+Open the package and follow Installer. It installs the Core Audio driver,
+**Numark NS6 Status**, and the CoreMIDI bridge. Administrator authorization is
+required. Connect and power on the NS6, then select **Numark NS6** in System
+Settings → Sound → Output or in your DJ application's audio preferences.
+
+In Mixxx, select **Numark NS6** for both the audio device and the controller's
+MIDI input/output. Route Master to channels 1–2 and Headphones to channels
+3–4. The MIDI bridge starts automatically after installation when you log in.
+
+## 🧪 Build and test from source
+
+Build the driver, status app, and MIDI bridge with Xcode Command Line Tools on
+an Apple Silicon Mac:
 
 ```sh
-brew install libusb pkgconf
+cd coreaudio
+make
+make midi-parser-test
 ```
 
-Then build and run the read-only descriptor probe:
+To create a local installer package:
 
 ```sh
-cd macos/tools
-make ns6-libusb-probe
-./ns6-libusb-probe
+make package VERSION=0.2.50
 ```
 
-On managed development environments the command needs to run outside their
-sandbox. On a normal Terminal session it only enumerates the device and reads
-its descriptors; it neither claims an interface nor sends USB traffic.
-
-The expected NS6 descriptor layout is:
-
-| Interface | Alternate setting | Endpoint | Purpose |
-| --- | --- | --- | --- |
-| 0 | 1 | `0x02` | ISO OUT, four-channel S24_3LE playback |
-| 0 | 1 | `0x83` / `0x04` | Bulk MIDI input / output |
-| 1 | 1 | `0x81` | ISO IN feedback, currently known to be unreliable |
-| 1 | 1 | `0x86` | Bulk waveform input, drained continuously |
-
-## Clock work
-
-The next transport milestone starts silence URBs, records actual completion
-cadence and buffer occupancy, and writes a timestamped CSV trace. That gives
-us a measured device rate before implementing the adaptive resampler.
-
-## VirtualDJ
-
-The driver repository includes a native CoreMIDI definition and mapper in
-[`virtualdj/`](virtualdj/). Install both files while VirtualDJ is closed:
+The package is written to `coreaudio/dist/`. For USB descriptor diagnostics,
+build and run the read-only probe separately:
 
 ```sh
-cp virtualdj/NS6M1.xml "$HOME/Library/Application Support/VirtualDJ/Devices/"
-cp "virtualdj/Numark NS6 M1 mapping.xml" "$HOME/Library/Application Support/VirtualDJ/Mappers/"
+cd tools
+make ns6-probe
+./ns6-probe
 ```
 
-After reopening VirtualDJ, it detects **Numark NS6 (Apple Silicon)** as
-`NS6M1`. The mapper includes four-deck transport, touch jogs, pitch, hotcues,
-loops, mixer controls, PFL, browser, FX controls, and button LED feedback.
-VirtualDJ requires a VDJ Pro license for continuous use of this external
-controller.
+The probe lists the NS6 USB configuration and endpoints. It does not claim an
+interface, initialize the controller, or send audio or MIDI.
 
-## Acknowledgements
+## 🤝 Technical heritage and acknowledgements
 
-- **[Gregory Senay](https://github.com/GregorySenay)** — honorary mention for
-  independent NS6 protocol research and Apple Silicon hardware testing. His
-  findings helped validate the host-identification SysEx handshake
-  (`0x50`/`0x51`/`0x60`), investigate the `0x81` clock-feedback reports, and
-  compare isochronous audio packet formats. He also contributed related
-  analysis in [pull request #4](https://github.com/maurojuniorr/numark-ns6-linux/pull/4)
-  to the Linux project. This macOS driver builds on that research alongside
-  the Linux project's earlier work; it does not copy his separate prototype
-  wholesale.
+This macOS driver continues the work in
+[maurojuniorr/numark-ns6-linux](https://github.com/maurojuniorr/numark-ns6-linux),
+which established the NS6 vendor activation, SysEx initialization sequence,
+initial controller state, and the early USB/audio/MIDI investigation. The
+Linux kernel driver remains incomplete; the macOS implementation is a separate
+Core Audio/CoreMIDI adaptation of that shared work.
+
+**Honorable mention — [Gregory Senay](https://github.com/GregorySenay).** His
+independent NS6 protocol research and Apple Silicon hardware testing contributed
+important findings to this effort. In particular, his analysis helped verify
+the `0x50`/`0x51`/`0x60` initialization exchange, identify the `0x81` feedback
+endpoint's 44/45-frame reports, and establish why audio packets must carry whole
+frames in a five/six-frame cadence for an exact 44.1 kHz average. His related
+Linux kernel proposal and test notes are in
+[PR #4](https://github.com/maurojuniorr/numark-ns6-linux/pull/4); his separate
+macOS research is at [GregorySenay/ns6-macos](https://github.com/GregorySenay/ns6-macos).
+This project credits and builds on those findings while maintaining its own
+implementation and test results.
+
+## 🛠️ Help improve it
+
+Testing on another Apple Silicon Mac, macOS release, or DJ application is
+valuable. Please include the macOS version, driver version, application and
+audio settings, and the approximate time of any disconnect or audio artifact
+when opening an issue. Contributions to the driver, diagnostics, and
+documentation are welcome.
