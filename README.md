@@ -8,6 +8,19 @@ installed on some Macs are Intel-only and cannot load on Apple Silicon.
 The Core Audio HAL owns the NS6 USB interfaces, runs the vendor initialization
 sequence, and publishes four playback channels at 44.1 kHz S24_3LE.
 
+## Project status
+
+This is an experimental, in-progress Apple Silicon driver derived from work on
+the still-incomplete Linux NS6 driver. It currently focuses on four-channel
+audio output and MIDI control through the companion CoreMIDI bridge; it is not
+an official Numark driver, and some behavior still needs broader hardware and
+long-duration testing. The NS6 feedback endpoint is monitored for diagnostics,
+but its reports do not yet control the audio clock.
+
+Audio capture is not currently exposed as a macOS input device. The separate
+USB descriptor probe under `tools/` is a read-only diagnostic utility; it is
+not part of the installer.
+
 ## MIDI
 
 The HAL owns the USB session and sends MIDI over a local loopback socket to
@@ -77,3 +90,14 @@ After reopening VirtualDJ, it detects **Numark NS6 (Apple Silicon)** as
 loops, mixer controls, PFL, browser, FX controls, and button LED feedback.
 VirtualDJ requires a VDJ Pro license for continuous use of this external
 controller.
+
+## Acknowledgements
+
+- **[Gregory Senay](https://github.com/GregorySenay)** — honorary mention for
+  independent NS6 protocol research and Apple Silicon hardware testing. His
+  findings helped validate the host-identification SysEx handshake
+  (`0x50`/`0x51`/`0x60`), investigate the `0x81` clock-feedback reports, and
+  compare isochronous audio packet formats. He also contributed related
+  analysis in a pull request to the Linux project. This macOS driver builds
+  on that research alongside the Linux project's earlier work; it does not
+  copy his separate prototype wholesale.
