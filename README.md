@@ -89,9 +89,10 @@ completions, packet/transfer errors, and recovery events.
 - **Long-term audio stability is still under test.** The current test has been
   clean by ear and the driver counters are clear, but callback timing varies
   and the feedback reader recorded occasional errors.
-- NS6 Status now reads a firmware-version property populated by a read-only
-  vendor request. The expected `1.0.3 (K1)` decoding follows the Ploytec kext's
-  packed-response parser and still needs confirmation on the physical NS6.
+- NS6 Status reads a firmware-version property populated by a read-only
+  vendor request. The connected NS6 returned `31 01 03 02 02`, matching
+  `1.0.3 (K1)` from the original Windows panel; other firmware variants have
+  not been validated.
 - The separate `tools/ns6-probe` program only reads USB descriptors. It is a
   development diagnostic, is not required by the driver, and is not included
   in the installer.

@@ -8,4 +8,10 @@ Numark NS6 firmware query failed: status 0x00000000, returned 5 of 8 bytes
 
 The 0.2.105 parser incorrectly required exactly 8 bytes, so no firmware version reached NS6 Status. Package 0.2.106 accepts a response of 3–8 bytes, validates the known version fields, and logs the returned bytes for hardware confirmation. The current capture from the original Mojave driver contains no endpoint-zero control requests, so it cannot supply those bytes.
 
-The 0.2.106 package has been built and unit-tested but has not yet been installed. Until its raw response is observed, the mapping from the response's first byte to the Windows panel's `K1` label remains unconfirmed.
+After installing 0.2.106, two starts returned the same five bytes:
+
+```
+31 01 03 02 02
+```
+
+The first byte is ASCII `1` (`0x31`), not numeric `0x01` as the initial decoder assumed. The next bytes match major `1` and decimal minor/patch `03`, so the observed response agrees with the Windows panel's `1.0.3 (K1)`. Version 0.2.107 accepts this measured response. Other device variants remain unverified and are rejected rather than guessed.
