@@ -11,6 +11,7 @@ private let driverBufferProperty: AudioObjectPropertySelector = 0x6e733662 // 'n
 private let driverBufferRestartProperty: AudioObjectPropertySelector = 0x6e733672 // 'ns6r'
 private let activeIOFramesProperty: AudioObjectPropertySelector = 0x6e733666 // 'ns6f'
 private let activeClientProperty: AudioObjectPropertySelector = 0x6e733663 // 'ns6c'
+private let firmwareVersionProperty: AudioObjectPropertySelector = 0x6e733676 // 'ns6v'
 private let supportedBufferFrames: [UInt32] = [49, 128, 192, 256, 512, 1024]
 private let audioPropertyQueue = DispatchQueue(label: "io.github.maurojuniorr.numark-ns6.status.audio-properties", qos: .utility)
 private let bufferConfigurationQueue = DispatchQueue(label: "io.github.maurojuniorr.numark-ns6.status.buffer-configuration", qos: .userInitiated)
@@ -37,6 +38,7 @@ private struct StatusSnapshot {
     let bufferFrames: UInt32?
     let bufferSettable: Bool
     let bufferRestartState: String?
+    let firmwareVersion: String?
     let activeFlowSummary: String
 }
 
@@ -65,6 +67,16 @@ private func driverBufferFrames(_ device: AudioDeviceID) -> UInt32? {
           let text = value?.takeRetainedValue() as String?,
           let frames = UInt32(text) else { return nil }
     return frames
+}
+
+private func driverFirmwareVersion(_ device: AudioDeviceID) -> String? {
+    var address = AudioObjectPropertyAddress(mSelector: firmwareVersionProperty, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    var value: Unmanaged<CFString>?
+    var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+    guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr,
+          let text = value?.takeRetainedValue() as String?,
+          text != "Unavailable" else { return nil }
+    return text
 }
 
 private func driverBufferRestartState(_ device: AudioDeviceID) -> String? {
@@ -299,9 +311,11 @@ final class StatusController: NSViewController {
             let device = audioDeviceID()
             var currentFrames: UInt32?
             var restartState: String?
+            var firmwareVersion: String?
             var canSetBuffer = false
             var flowSummary = "No active audio flow"
             if let device {
+                firmwareVersion = driverFirmwareVersion(device)
                 var address = AudioObjectPropertyAddress(mSelector: driverBufferProperty, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
                 if let frames = driverBufferFrames(device) {
                     currentFrames = frames
@@ -332,7 +346,7 @@ final class StatusController: NSViewController {
                     flowSummary = "No callback observed · CoreAudio reports idle"
                 }
             }
-            let snapshot = StatusSnapshot(usbConnected: connected, audioDevice: device, bufferFrames: currentFrames, bufferSettable: canSetBuffer, bufferRestartState: restartState, activeFlowSummary: flowSummary)
+            let snapshot = StatusSnapshot(usbConnected: connected, audioDevice: device, bufferFrames: currentFrames, bufferSettable: canSetBuffer, bufferRestartState: restartState, firmwareVersion: firmwareVersion, activeFlowSummary: flowSummary)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.refreshInProgress = false
@@ -346,7 +360,7 @@ final class StatusController: NSViewController {
         statusLabel.stringValue = ready ? "CONNECTED — audio driver ready" : (snapshot.usbConnected ? "CONNECTED — waiting for audio driver" : "NO DEVICE")
         stateDot.layer?.backgroundColor = (ready ? NSColor.systemGreen : (snapshot.usbConnected ? NSColor.systemOrange : NSColor.systemRed)).cgColor
         valueLabels[0].stringValue = snapshot.usbConnected ? "Numark NS6 (USB)" : "—"
-        valueLabels[8].stringValue = snapshot.usbConnected ? "Unavailable (vendor query pending)" : "—"
+        valueLabels[8].stringValue = snapshot.usbConnected ? (snapshot.firmwareVersion ?? "Unavailable") : "—"
         valueLabels[9].stringValue = ready ? snapshot.activeFlowSummary : "—"
         guard ready, let frames = snapshot.bufferFrames else {
             bufferPopup.isEnabled = false

@@ -80,13 +80,18 @@ completions, packet/transfer errors, and recovery events.
 
 ## ⚠️ Current limitations
 
-- **Audio capture is not implemented** as a macOS input device. The NS6's two
-  hardware inputs are not available to applications through this driver.
+- **Audio capture is not implemented** as a macOS input device. The Ploytec
+  kext contains generic input-stream code, but the available Mojave USB trace
+  shows no separate PCM input endpoint: `0x81` carries short feedback data,
+  `0x86` carries structured bulk data used by the waveform path, and the other
+  endpoints are playback/MIDI. A Windows capture with known audio on the
+  physical inputs is still needed to reconcile “Inputs: 2” with the USB traffic.
 - **Long-term audio stability is still under test.** The current test has been
   clean by ear and the driver counters are clear, but callback timing varies
   and the feedback reader recorded occasional errors.
-- The firmware version is not queried from the controller yet; NS6 Status
-  reports it as unavailable.
+- NS6 Status now reads a firmware-version property populated by a read-only
+  vendor request. The expected `1.0.3 (K1)` decoding follows the Ploytec kext's
+  packed-response parser and still needs confirmation on the physical NS6.
 - The separate `tools/ns6-probe` program only reads USB descriptors. It is a
   development diagnostic, is not required by the driver, and is not included
   in the installer.

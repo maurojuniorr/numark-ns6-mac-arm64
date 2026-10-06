@@ -8,7 +8,7 @@ NS6_USB_OUTPUT_SLOT_COUNT ?= 8
 CFLAGS := -Wall -Wextra -Werror -arch arm64 -isysroot $(SDK) -mmacosx-version-min=15.0 -fPIC -DNS6_ADAPTIVE_CLOCK_ENABLED=$(ADAPTIVE_CLOCK) -DNS6_FEEDBACK_PATTERN_SCHEDULER_ENABLED=$(NS6_FEEDBACK_PATTERN_SCHEDULER) -DNS6_ADAPTIVE_CLOCK_MIN_OUTPUT_RATE_MILLIHZ=$(NS6_ADAPTIVE_CLOCK_MIN_OUTPUT_RATE_MILLIHZ) -DNS6_MIDI_ENABLED=$(NS6_MIDI_ENABLED) -DNS6_FEEDBACK_READER_ENABLED=$(NS6_FEEDBACK_READER_ENABLED) -DNS6_USB_OUTPUT_SLOT_COUNT=$(NS6_USB_OUTPUT_SLOT_COUNT)
 BUILD := build/NumarkNS6.driver/Contents
 APP := build/NumarkNS6Status.app
-VERSION ?= 0.2.104
+VERSION ?= 0.2.105
 BUNDLE_BUILD_VERSION ?= $(shell echo $(VERSION) | awk -F. '{print $$3}')
 PACKAGE_ID := io.github.maurojuniorr.numark-ns6
 PACKAGE_ROOT := build/package-root
@@ -18,11 +18,15 @@ FORCE:
 
 .PHONY: FORCE usb-work-interval-regression-test audio-recovery-test zero-timestamp-test
 
+firmware-version-test: NS6FirmwareVersionTest.c NS6FirmwareVersion.c NS6FirmwareVersion.h
+	$(CC) -Wall -Wextra -Werror NS6FirmwareVersionTest.c NS6FirmwareVersion.c -o build/ns6-firmware-version-test
+	build/ns6-firmware-version-test
+
 all: $(BUILD)/MacOS/NumarkNS6 $(BUILD)/Info.plist app midi-bridge
 
-$(BUILD)/MacOS/NumarkNS6: FORCE NS6HAL.c NS6Transport.c NS6USB.c NS6USBEndpoint.h NS6USBConfig.h NS6USBTiming.c NS6USBTiming.h NS6USBFrameTimestamps.h NS6USBWorkerQoS.h NS6ClockControl.c NS6ClockControl.h NS6MIDI.c NS6MIDIParser.h NS6MIDIRecovery.h NS6BufferFrameSize.h NS6ZeroTimestamp.h NS6AudioRecovery.c NS6AudioRecovery.h
+$(BUILD)/MacOS/NumarkNS6: FORCE NS6HAL.c NS6Transport.c NS6USB.c NS6USBEndpoint.h NS6USBConfig.h NS6USBTiming.c NS6USBTiming.h NS6USBFrameTimestamps.h NS6USBWorkerQoS.h NS6ClockControl.c NS6ClockControl.h NS6MIDI.c NS6MIDIParser.h NS6MIDIRecovery.h NS6BufferFrameSize.h NS6ZeroTimestamp.h NS6AudioRecovery.c NS6AudioRecovery.h NS6FirmwareVersion.c NS6FirmwareVersion.h
 	mkdir -p $(BUILD)/MacOS
-	$(CC) $(CFLAGS) -bundle NS6HAL.c NS6Transport.c NS6USB.c NS6USBTiming.c NS6ClockControl.c NS6MIDI.c NS6AudioRecovery.c -o $@ -framework CoreAudio -framework CoreFoundation -framework IOKit
+	$(CC) $(CFLAGS) -bundle NS6HAL.c NS6Transport.c NS6USB.c NS6USBTiming.c NS6ClockControl.c NS6MIDI.c NS6AudioRecovery.c NS6FirmwareVersion.c -o $@ -framework CoreAudio -framework CoreFoundation -framework IOKit
 $(BUILD)/Info.plist: Info.plist FORCE
 	mkdir -p $(BUILD)
 	cp $< $@
@@ -50,9 +54,9 @@ $(APP)/Contents/Resources/NS6Status.icns: status-app/NS6Status.icns
 clean:
 	rm -rf build
 
-usb-test: NS6USBTest.c NS6Transport.c NS6USB.c NS6USBEndpoint.h NS6USBTiming.c NS6USBTiming.h NS6ClockControl.c NS6MIDI.c NS6AudioRecovery.c NS6AudioRecovery.h
+usb-test: NS6USBTest.c NS6Transport.c NS6USB.c NS6USBEndpoint.h NS6USBTiming.c NS6USBTiming.h NS6ClockControl.c NS6MIDI.c NS6AudioRecovery.c NS6AudioRecovery.h NS6FirmwareVersion.c NS6FirmwareVersion.h
 	mkdir -p build
-	$(CC) $(CFLAGS) NS6USBTest.c NS6Transport.c NS6USB.c NS6USBTiming.c NS6ClockControl.c NS6MIDI.c NS6AudioRecovery.c -o build/ns6-usb-test -framework CoreAudio -framework CoreFoundation -framework IOKit -lm
+	$(CC) $(CFLAGS) NS6USBTest.c NS6Transport.c NS6USB.c NS6USBTiming.c NS6ClockControl.c NS6MIDI.c NS6AudioRecovery.c NS6FirmwareVersion.c -o build/ns6-usb-test -framework CoreAudio -framework CoreFoundation -framework IOKit -lm
 
 usb-work-interval-regression-test: $(BUILD)/MacOS/NumarkNS6 NS6USBWorkIntervalRegressionTest.sh
 	./NS6USBWorkIntervalRegressionTest.sh $(BUILD)/MacOS/NumarkNS6
@@ -127,6 +131,10 @@ usb-config-test: NS6USBConfig.h NS6USBConfigTest.c
 	build/ns6-usb-config-default-test
 	$(CC) -Wall -Wextra -Werror -DNS6_MIDI_ENABLED=0 -DNS6_FEEDBACK_READER_ENABLED=0 -DNS6_USB_OUTPUT_SLOT_COUNT=32 NS6USBConfigTest.c -o build/ns6-usb-config-diagnostic-test
 	build/ns6-usb-config-diagnostic-test
+
+test:
+	mkdir -p build
+	$(MAKE) midi-parser-test midi-recovery-test buffer-frame-size-test zero-timestamp-test transport-ring-test clock-control-test clock-feedback-pattern-test clock-control-fixed-test clock-control-nominal-floor-test audio-recovery-test io-metrics-test usb-endpoint-test usb-timing-test usb-config-test firmware-version-test
 
 midi-bridge: build/NumarkNS6MIDIBridge
 build/NumarkNS6MIDIBridge: NS6MIDIBridge.c

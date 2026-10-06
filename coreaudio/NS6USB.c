@@ -8,6 +8,7 @@
 #include "NS6USBEndpoint.h"
 #include "NS6USBConfig.h"
 #include "NS6AudioRecovery.h"
+#include "NS6FirmwareVersion.h"
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOCFPlugIn.h>
 #include <IOKit/IOKitLib.h>
@@ -65,6 +66,8 @@ static atomic_bool output_paused=true;
 static atomic_bool awaiting_audio_prefill;
 static atomic_bool waveform_drain_running;
 static atomic_uint startup_buffer_frames=256;
+static atomic_uint firmware_response_bits;
+static atomic_bool firmware_response_valid;
 static atomic_bool standby_prime_pending;
 static atomic_uint_fast64_t completed_transfers;
 static NS6USBTiming completion_interval_timing;
@@ -360,6 +363,32 @@ static bool usb_failure(const char *operation,IOReturn result){fprintf(stderr,"N
 static IOReturn control(UInt8 type,UInt8 request,UInt16 value,UInt16 index,void *data,UInt16 length){
     IOUSBDevRequest r={type,request,value,index,length,data,0}; return (*interface)->ControlRequest(interface,0,&r);
 }
+static void read_firmware_version(void){
+    uint8_t response[8]={0};char version[32]={0};
+    atomic_store_explicit(&firmware_response_valid,false,memory_order_release);
+    IOUSBDevRequest request={0xc0,0x56,0,0,sizeof(response),response,0};
+    IOReturn result=(*interface)->ControlRequest(interface,0,&request);
+    if(result!=kIOReturnSuccess||request.wLenDone!=sizeof(response)){
+        os_log_error(OS_LOG_DEFAULT,"Numark NS6 firmware query failed: status 0x%08x, returned %u of %zu bytes",(unsigned)result,request.wLenDone,sizeof(response));
+        return;
+    }
+    if(!ns6_firmware_version_decode(response,sizeof(response),version)){
+        os_log_error(OS_LOG_DEFAULT,"Numark NS6 firmware response has an unsupported format: %02x %02x %02x",response[0],response[1],response[2]);
+        return;
+    }
+    uint32_t packed=(uint32_t)response[0]|((uint32_t)response[1]<<8)|((uint32_t)response[2]<<16);
+    atomic_store_explicit(&firmware_response_bits,packed,memory_order_relaxed);
+    atomic_store_explicit(&firmware_response_valid,true,memory_order_release);
+    os_log(OS_LOG_DEFAULT,"Numark NS6 firmware version response: %{public}s",version);
+}
+bool ns6_usb_get_firmware_version(char output[32]){
+    if(!output)return false;
+    output[0]=0;
+    if(!atomic_load_explicit(&firmware_response_valid,memory_order_acquire))return false;
+    uint32_t packed=atomic_load_explicit(&firmware_response_bits,memory_order_relaxed);
+    uint8_t response[8]={(uint8_t)packed,(uint8_t)(packed>>8),(uint8_t)(packed>>16),0,0,0,0,0};
+    return ns6_firmware_version_decode(response,sizeof(response),output);
+}
 static void fill(struct slot *slot){
     unsigned char *output=slot->data;
     unsigned millisecond_frames[8];
@@ -558,6 +587,7 @@ static bool initialize(void){
     result=control(0xc0,86,0,0,capability,8); if(result!=kIOReturnSuccess)return usb_failure("read capability",result);
     UInt16 capability_length=capability[0]<sizeof(capability)?capability[0]:(UInt16)sizeof(capability);
     if(capability_length){result=control(0xc0,86,0,0,capability,capability_length);if(result!=kIOReturnSuccess)return usb_failure("read capability details",result);}
+    read_firmware_version();
     result=control(0x22,1,0x0100,134,rate,sizeof(rate));if(result!=kIOReturnSuccess)return usb_failure("set clock selector 134",result);
     result=control(0x22,1,0x0100,2,rate,sizeof(rate));if(result!=kIOReturnSuccess)return usb_failure("set clock selector 2",result);
     result=control(0x40,73,0x0032,0,NULL,0);if(result!=kIOReturnSuccess)return usb_failure("start audio engine",result);
