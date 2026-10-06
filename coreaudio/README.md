@@ -25,10 +25,23 @@ the first eight USB transfers. This prevents the device from alternating
 between empty packets and live audio while CoreAudio is filling its first
 buffers.
 
-During playback, the USB worker uses a fixed 5/6-frame cadence. The 441/80
-fractional accumulator emits only complete 12-byte frames and averages exactly
-44,100 frames/s; changing packet sizes from the host queue is audible on the
-NS6.
+The USB worker emits whole audio frames in groups of eight microframes. The
+fixed build uses a fractional 44.1-frame-per-millisecond cadence. The adaptive
+build reads NS6 feedback endpoint `0x81` and tracks its rolling rate, keeping
+the transmitted rate within 44,000.0–44,100.3 frames/s. Fractional packet
+scheduling distributes that rate across USB output blocks instead of repeating
+one feedback byte across a whole block. The resampler follows the transmitted
+rate, with a bounded queue-occupancy trim bridging to CoreAudio's 44.1 kHz
+stream. The feedback reader and packet layout follow Gregory Senay's
+hardware-verified findings; enable adaptive mode for testing with
+`make ADAPTIVE_CLOCK=1`.
+
+In a live hardware check of the adaptive 0.2.102 build, the feedback averaged
+44,099.6–44,100.6 frames/s and the requested-versus-sent frame difference
+remained near 1,411 frames instead of continuing to grow. That observed window
+had no driver underruns or USB transfer/packet errors. Callback intervals still
+varied, so the result supports the clock correction but does not establish that
+all audible glitches are fixed.
 
 The former Numark package included an Intel-only Ploytec kext. This project
 does not load or depend on it.
@@ -36,9 +49,10 @@ does not load or depend on it.
 ## Audio glitch diagnostics
 
 The USB worker periodically logs transfer health, queued frames, underrun event
-and frame counts, largest underrun burst, isochronous packet errors, and short
-output packets. Underruns and packet faults also produce rate-limited detail
-messages when they occur. CoreAudio queue rejections are logged separately.
+and frame counts, largest underrun burst, isochronous packet errors, short
+output packets, callback cadence, and callback work duration. Underruns and
+packet faults also produce rate-limited detail messages when they occur.
+CoreAudio queue rejections are logged separately.
 After a glitch, collect the matching system log entries with:
 
 ```sh
@@ -46,17 +60,24 @@ log show --last 2h --style compact --predicate 'eventMessage CONTAINS[c] "Numark
 ```
 
 Record the glitch time as well; the timestamps let us compare the audio capture
-with the driver's queue and USB counters. The diagnostic reader also samples
-the optional USB feedback endpoint `0x81` on USB interface 1 and logs one-second
-windows of its 44/45-frame reports; it does not use those values to alter playback timing.
+with the driver's queue and USB counters. The diagnostic reader samples USB
+feedback endpoint `0x81` on interface 1. The logs distinguish the raw rolling
+feedback estimate from the bounded rate actually sent to the device, and retain
+requested-versus-sent frame debt as a diagnostic.
+When a USB completion callback is delayed by more than 20 ms, the driver also
+logs the per-frame USB timestamps. `newest age` compares the last frame's
+monotonic timestamp with callback delivery; this distinguishes late callback
+delivery from a gap in frame processing.
 
 ## Data path
 
 `DoIOOperation(WriteMix)` copies PCM to `NS6Transport` without allocation or
-locking. The USB worker removes packed 24-bit frames from that queue and emits
-the 5/6-frame high-speed ISO packet pattern used by the validated native
-transport. This separation is required because CoreAudio invokes `DoIOOperation`
-on a real-time deadline while USB completion callbacks run on a normal run loop.
+locking. The USB worker resamples packed 24-bit frames from that queue by a
+fractional source phase, then emits the 5/6-frame high-speed ISO packet pattern
+used by the validated native transport. Queue occupancy trims the host/device
+clock ratio to keep the bounded FIFO away from starvation and overflow. This
+separation is required because CoreAudio invokes `DoIOOperation` on a real-time
+deadline while USB completion callbacks run on a normal run loop.
 
 ## Build and install
 
@@ -76,17 +97,17 @@ separate from Numark's old Intel-only bundle.
 
 ## Installer package
 
-Build a local macOS installer package with:
+Build an adaptive macOS installer package with:
 
 ```sh
-make package
+make ADAPTIVE_CLOCK=1 package VERSION=0.2.102
 ```
 
-The package is written to `dist/NumarkNS6-0.1.0.pkg`. Open it in Finder or
+The package is written to `dist/NumarkNS6-0.2.102.pkg`. Open it in Finder or
 install it from Terminal with:
 
 ```sh
-sudo installer -pkg dist/NumarkNS6-0.1.0.pkg -target /
+sudo installer -pkg dist/NumarkNS6-0.2.102.pkg -target /
 ```
 
 It installs the arm64 HAL bundle in `/Library/Audio/Plug-Ins/HAL` and restarts
