@@ -2,6 +2,7 @@
 #include "NS6USB.h"
 #include "NS6BufferFrameSize.h"
 #include "NS6ZeroTimestamp.h"
+#include "NS6ActiveFlow.h"
 #include <CoreAudio/AudioHardware.h>
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <CoreFoundation/CFPlugInCOM.h>
@@ -38,7 +39,7 @@ static atomic_uint buffer_frames=256;
 static atomic_uint driver_buffer_frames=256;
 static atomic_uint buffer_size_read_log_count;
 static atomic_uint buffer_range_read_log_count;
-static atomic_uint active_io_frames;
+static NS6ActiveFlow active_flow;
 static atomic_bool buffer_restart_pending;
 static atomic_uint buffer_restart_state;
 
@@ -197,9 +198,9 @@ static OSStatus get_property(AudioServerPlugInDriverRef d,AudioObjectID object,p
         case kAudioObjectPropertyCustomPropertyInfoList:if(object==DEVICE_ID)memcpy(output,custom_property_info,sizeof(custom_property_info));return 0;
         case NS6_DRIVER_BUFFER_PROPERTY:*(CFStringRef*)output=CFStringCreateWithFormat(kCFAllocatorDefault,NULL,CFSTR("%u"),atomic_load_explicit(&driver_buffer_frames,memory_order_acquire));return *(CFStringRef*)output?0:kAudioHardwareUnspecifiedError;
         case NS6_BUFFER_RESTART_PROPERTY:{UInt32 state=atomic_load_explicit(&buffer_restart_state,memory_order_acquire);const char *text=state==1?"restarting":state==2?"restarted":state==3?"failed":state==4?"applied":"idle";*(CFStringRef*)output=CFStringCreateWithCString(kCFAllocatorDefault,text,kCFStringEncodingUTF8);return *(CFStringRef*)output?0:kAudioHardwareUnspecifiedError;}
-        case NS6_ACTIVE_IO_FRAMES_PROPERTY:*(CFStringRef*)output=CFStringCreateWithFormat(kCFAllocatorDefault,NULL,CFSTR("%u"),atomic_load_explicit(&active_io_frames,memory_order_acquire));return *(CFStringRef*)output?0:kAudioHardwareUnspecifiedError;
+        case NS6_ACTIVE_IO_FRAMES_PROPERTY:{uint64_t max_age=2000000000ull*timebase.denom/timebase.numer;NS6ActiveFlowSnapshot flow=ns6_active_flow_snapshot(&active_flow,mach_absolute_time(),max_age);*(CFStringRef*)output=CFStringCreateWithFormat(kCFAllocatorDefault,NULL,CFSTR("%u"),flow.frames);return *(CFStringRef*)output?0:kAudioHardwareUnspecifiedError;}
         case NS6_FIRMWARE_VERSION_PROPERTY:{char version[32]={0};const char *value=ns6_usb_get_firmware_version(version)?version:"Unavailable";*(CFStringRef*)output=CFStringCreateWithCString(kCFAllocatorDefault,value,kCFStringEncodingUTF8);return *(CFStringRef*)output?0:kAudioHardwareUnspecifiedError;}
-        case NS6_ACTIVE_CLIENT_PROPERTY:{pid_t active_pid=0;char bundle_id[256]={0};pthread_mutex_lock(&stream_lock);NS6TrackedClient *latest=NULL;for(size_t n=0;n<NS6_TRACKED_CLIENTS;++n)if(tracked_clients[n].used&&tracked_clients[n].starts&&(!latest||tracked_clients[n].order>latest->order))latest=&tracked_clients[n];if(latest){active_pid=latest->pid;memcpy(bundle_id,latest->bundle_id,sizeof(bundle_id));}pthread_mutex_unlock(&stream_lock);*(CFStringRef*)output=CFStringCreateWithFormat(kCFAllocatorDefault,NULL,CFSTR("%d|%s"),active_pid,bundle_id);return *(CFStringRef*)output?0:kAudioHardwareUnspecifiedError;}
+        case NS6_ACTIVE_CLIENT_PROPERTY:{pid_t active_pid=0;char bundle_id[256]={0};uint64_t max_age=2000000000ull*timebase.denom/timebase.numer;NS6ActiveFlowSnapshot flow=ns6_active_flow_snapshot(&active_flow,mach_absolute_time(),max_age);pthread_mutex_lock(&stream_lock);NS6TrackedClient *client=flow.frames?find_client_locked(flow.client_id):NULL;if(client){active_pid=client->pid;memcpy(bundle_id,client->bundle_id,sizeof(bundle_id));}pthread_mutex_unlock(&stream_lock);*(CFStringRef*)output=CFStringCreateWithFormat(kCFAllocatorDefault,NULL,CFSTR("%d|%s"),active_pid,bundle_id);return *(CFStringRef*)output?0:kAudioHardwareUnspecifiedError;}
         case kAudioObjectPropertyBaseClass:*(AudioClassID*)output=kAudioObjectClassID;return 0;
         case kAudioObjectPropertyClass:*(AudioClassID*)output=object==kAudioObjectPlugInObject?kAudioPlugInClassID:(object==DEVICE_ID?kAudioDeviceClassID:kAudioStreamClassID);return 0;
         case kAudioObjectPropertyOwner:*(AudioObjectID*)output=object==STREAM_ID?DEVICE_ID:kAudioObjectUnknown;return 0;
@@ -266,7 +267,7 @@ static OSStatus stop_io(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32
     if(clients){
         clients=atomic_fetch_sub_explicit(&io_clients,1,memory_order_acq_rel)-1;
         if(!clients){
-            atomic_store_explicit(&active_io_frames,0,memory_order_release);
+            ns6_active_flow_clear(&active_flow);
             ns6_usb_set_paused(true);ns6_transport_discard();
             os_log(OS_LOG_DEFAULT,"Numark NS6 audio paused; keeping USB clock active with silence (client %u)",client);
         }
@@ -277,12 +278,12 @@ static OSStatus stop_io(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32
 }
 static OSStatus zero_timestamp(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32 client,Float64 *sample,UInt64 *host_time,UInt64 *out_seed){(void)d;(void)client;if(object!=DEVICE_ID||!sample||!host_time||!out_seed)return kAudioHardwareIllegalOperationError;NS6ZeroTimestamp value=ns6_zero_timestamp_calculate(anchor_host_time,mach_absolute_time(),timebase.numer,timebase.denom,SAMPLE_RATE);*sample=(Float64)value.sample_time;*host_time=value.host_time;*out_seed=seed;return 0;}
 static OSStatus will_do(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32 client,UInt32 operation,Boolean *will,Boolean *in_place){(void)d;(void)object;(void)client;if(!will||!in_place)return kAudioHardwareIllegalOperationError;*will=operation==kAudioServerPlugInIOOperationWriteMix;*in_place=true;return 0;}
-static OSStatus begin_io(AudioServerPlugInDriverRef d,AudioObjectID o,UInt32 c,UInt32 op,UInt32 frames,const AudioServerPlugInIOCycleInfo*i){(void)d;(void)c;(void)i;if(o==DEVICE_ID&&op==kAudioServerPlugInIOOperationWriteMix&&frames)atomic_store_explicit(&active_io_frames,frames,memory_order_release);return 0;}
+static OSStatus begin_io(AudioServerPlugInDriverRef d,AudioObjectID o,UInt32 c,UInt32 op,UInt32 frames,const AudioServerPlugInIOCycleInfo*i){(void)d;(void)i;if(o==DEVICE_ID&&op==kAudioServerPlugInIOOperationWriteMix&&frames)ns6_active_flow_record(&active_flow,frames,c,mach_absolute_time());return 0;}
 static OSStatus do_io(AudioServerPlugInDriverRef d,AudioObjectID object,AudioObjectID stream,UInt32 client,UInt32 operation,UInt32 frames,const AudioServerPlugInIOCycleInfo*i,void *main_buffer,void *secondary){
     (void)d;(void)client;(void)i;(void)secondary;
     if(object!=DEVICE_ID||stream!=STREAM_ID)return kAudioHardwareBadObjectError;
     if(operation==kAudioServerPlugInIOOperationWriteMix){
-        atomic_store_explicit(&active_io_frames,frames,memory_order_release);
+        ns6_active_flow_record(&active_flow,frames,client,mach_absolute_time());
         bool accepted=ns6_transport_enqueue(main_buffer,frames,&stream_format);
         if(!accepted){
             unsigned failures=atomic_fetch_add(&enqueue_failures,1)+1;

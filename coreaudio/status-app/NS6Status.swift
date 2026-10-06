@@ -223,19 +223,14 @@ final class StatusController: NSViewController {
             var flowSummary = "No active audio flow"
             if let device {
                 firmwareVersion = driverFirmwareVersion(device)
-                let running = uint32Property(device, selector: kAudioDevicePropertyDeviceIsRunning, scope: kAudioObjectPropertyScopeGlobal) != 0
-                if running {
+                if let frames = activeIOFrames(device) {
                     flowSummary = activeAudioClient(device)?.displayName ?? "CoreAudio client"
-                    if let frames = activeIOFrames(device) {
                         let fixedFrames = uint32Property(device, selector: kAudioDevicePropertyLatency, scope: kAudioObjectPropertyScopeOutput)
                             + uint32Property(device, selector: kAudioDevicePropertySafetyOffset, scope: kAudioObjectPropertyScopeOutput)
                             + firstStreamLatencyFrames(device)
                         let periodMilliseconds = Double(frames) * 1000.0 / sampleRate
                         let reportedMilliseconds = Double(frames + fixedFrames) * 1000.0 / sampleRate
                         flowSummary += String(format: "\nI/O buffer: %u samples (%.2f ms)\nReported latency: ~%.2f ms", frames, periodMilliseconds, reportedMilliseconds)
-                    } else {
-                        flowSummary += "\nWaiting for first audio callback"
-                    }
                 }
             }
             let snapshot = StatusSnapshot(usbConnected: connected, audioDevice: device, firmwareVersion: firmwareVersion, activeFlowSummary: flowSummary)
