@@ -368,12 +368,13 @@ static void read_firmware_version(void){
     atomic_store_explicit(&firmware_response_valid,false,memory_order_release);
     IOUSBDevRequest request={0xc0,0x56,0,0,sizeof(response),response,0};
     IOReturn result=(*interface)->ControlRequest(interface,0,&request);
-    if(result!=kIOReturnSuccess||request.wLenDone!=sizeof(response)){
+    if(result!=kIOReturnSuccess||request.wLenDone<3||request.wLenDone>sizeof(response)){
         os_log_error(OS_LOG_DEFAULT,"Numark NS6 firmware query failed: status 0x%08x, returned %u of %zu bytes",(unsigned)result,request.wLenDone,sizeof(response));
         return;
     }
-    if(!ns6_firmware_version_decode(response,sizeof(response),version)){
-        os_log_error(OS_LOG_DEFAULT,"Numark NS6 firmware response has an unsupported format: %02x %02x %02x",response[0],response[1],response[2]);
+    os_log(OS_LOG_DEFAULT,"Numark NS6 firmware raw response (%u bytes): %02x %02x %02x %02x %02x %02x %02x %02x",request.wLenDone,response[0],response[1],response[2],response[3],response[4],response[5],response[6],response[7]);
+    if(!ns6_firmware_version_decode(response,request.wLenDone,version)){
+        os_log_error(OS_LOG_DEFAULT,"Numark NS6 firmware response has an unsupported format");
         return;
     }
     uint32_t packed=(uint32_t)response[0]|((uint32_t)response[1]<<8)|((uint32_t)response[2]<<16);

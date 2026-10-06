@@ -4,7 +4,7 @@
 
 bool ns6_firmware_version_decode(const uint8_t response[8], size_t length, char output[32]) {
     if (output) output[0] = '\0';
-    if (!response || !output || length != 8 || response[0] != 1 || response[1] == 0 || response[2] > 99)
+    if (!response || !output || length < 3 || length > 8 || response[0] != 1 || response[1] == 0 || response[2] > 99)
         return false;
 
     /* Ploytec's scanFirmwareVersion stores response[1] as the major version
