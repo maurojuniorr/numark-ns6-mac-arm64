@@ -170,8 +170,8 @@ final class StatusController: NSViewController {
             row.alignment = name == "Active Audio Flow" ? .top : .centerY
             label.widthAnchor.constraint(equalToConstant: 145).isActive = true
             label.setContentHuggingPriority(.required, for: .horizontal)
-            row.widthAnchor.constraint(equalTo: details.widthAnchor).isActive = true
             details.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: details.widthAnchor).isActive = true
         }
 
         stateDot.wantsLayer = true
