@@ -10,13 +10,15 @@ setting 1, uses `LowLatencyWriteIsochPipeAsync`, and produces a clean 44.1 kHz
 test tone through the NS6.
 
 The HAL plug-in publishes one 4-channel, 44.1 kHz Float32 output device. Its
-NS6 Status app selects the CoreAudio buffer size live among 49, 128, 192, 256, 512, and
-1024 frames, matching the choices shown in the original Windows NS6 panel. A
-change is requested through CoreAudio's device-configuration mechanism so
-clients can stop and restart their I/O around the new period. At 44.1 kHz,
-those sizes correspond to approximately 1.1, 2.9, 4.4, 5.8, 11.6, and
-23.2 ms per buffer. Its
-worker converts the CoreAudio mix to the packed 24-bit format used by the NS6.
+The HAL accepts CoreAudio clients' buffer-frame-size requests, including the
+period selected in Mixxx, and returns the active frame count through the same
+property instead of forcing a constant 96-frame report. NS6 Status shows the
+active stream period and its calculated latency; in hardware testing it matched
+Mixxx's reported latency. The Status app's USB startup pre-buffer is a separate
+driver-side control and does not change the client's period. At 44.1 kHz, 49,
+128, 192, 256, 512, and 1024 frames correspond to approximately 1.1, 2.9, 4.4,
+5.8, 11.6, and 23.2 ms per buffer. The worker converts the CoreAudio mix to the
+packed 24-bit format used by the NS6.
 Channels 1/2 feed Master and channels 3/4 feed Headphones independently, so
 DJ software can route its main mix and cue mix separately.
 
@@ -36,12 +38,12 @@ stream. The feedback reader and packet layout follow Gregory Senay's
 hardware-verified findings; enable adaptive mode for testing with
 `make ADAPTIVE_CLOCK=1`.
 
-In a live hardware check of the adaptive 0.2.102 build, the feedback averaged
-44,099.6–44,100.6 frames/s and the requested-versus-sent frame difference
-remained near 1,411 frames instead of continuing to grow. That observed window
-had no driver underruns or USB transfer/packet errors. Callback intervals still
-varied, so the result supports the clock correction but does not establish that
-all audible glitches are fixed.
+During the October 6, 2026 follow-up test on adaptive build 0.2.102, Mauro
+reported no audible clicks or pops. Recent health logs showed zero driver
+underruns, USB transfer errors, packet errors, or short packets, and frame debt
+stayed bounded. Callback cadence still reached about 17 ms and the feedback
+reader recorded four read errors in the observed run. Longer playback is still
+needed before drawing conclusions about long-term stability.
 
 The former Numark package included an Intel-only Ploytec kext. This project
 does not load or depend on it.

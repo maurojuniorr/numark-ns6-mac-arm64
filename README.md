@@ -43,9 +43,12 @@ Silicon Macs running macOS 15 or later.
   transient device/interface loss and logs transfer health, queue underruns,
   packet errors, and feedback-endpoint readings for troubleshooting.
 
-The status app's startup pre-buffer is a driver-side USB setting. It does not
-set or limit the audio buffer selected inside Mixxx or another audio
-application. The active-flow latency shown by Status is measured separately.
+**Mixxx controls its own CoreAudio buffer period.** The HAL driver now accepts
+the frame size requested by the client and returns that active value through
+CoreAudio, instead of reporting a fixed 96-frame period. NS6 Status reports the
+active flow's frame count and corresponding latency; during hardware testing,
+that latency matched Mixxx's report. The Status app's USB startup pre-buffer is
+a separate driver setting and does not override Mixxx's choice.
 
 ## 🏗️ How the driver is put together
 
@@ -64,28 +67,23 @@ against the USB frame schedule while keeping output within 44,000–44,100.3
 frames per second. Build it with `ADAPTIVE_CLOCK=1`; it remains an explicit
 experimental option while it is tested with more applications and sessions.
 
-On October 6, 2026, a live hardware check of build 0.2.102 showed feedback
-averages around 44,099.6–44,100.6 frames per second, a stable requested-versus-
-sent frame difference (about 1,411 frames), and no logged USB transfer,
-isochronous packet, or driver underrun errors during the observed window. USB
-callback timing was still variable, so this check is evidence that the clock
-debt stopped accumulating, not proof that every audible artifact is resolved.
-The driver logs callback cadence and work duration, queue depth, frame
-timestamps on delayed completions, packet/transfer errors, and recovery events
-to help investigate remaining glitches.
+During the October 6, 2026 follow-up test on build 0.2.102, Mauro reported no
+audible clicks or pops. Recent health logs showed zero driver underruns, USB
+transfer errors, packet errors, or short packets; the requested-versus-sent
+frame debt stayed bounded. Callback cadence still reached about 17 ms, and the
+feedback reader had four read errors in the observed run, so longer listening
+tests remain important. These results describe the current test, not a guarantee
+that artifacts can never return. The driver logs callback cadence and work
+duration, queue depth, frame timestamps on delayed completions, packet/transfer
+errors, and recovery events to investigate future glitches.
 
 ## ⚠️ Current limitations
 
 - **Audio capture is not implemented** as a macOS input device. The NS6's two
   hardware inputs are not available to applications through this driver.
-- **Long-term audio stability is still under test.** The latest adaptive-clock
-  check showed stable frame debt and clean USB/underrun counters, but callback
-  timing varies and occasional audible artifacts have not been conclusively
-  eliminated.
-- The app-selected CoreAudio period and the driver's USB startup pre-buffer
-  are separate settings. The driver's status app does not override the buffer
-  selected by Mixxx or another client; requests and active I/O information are
-  exposed in CoreAudio diagnostics and Status.
+- **Long-term audio stability is still under test.** The current test has been
+  clean by ear and the driver counters are clear, but callback timing varies
+  and the feedback reader recorded occasional errors.
 - The firmware version is not queried from the controller yet; NS6 Status
   reports it as unavailable.
 - The separate `tools/ns6-probe` program only reads USB descriptors. It is a
