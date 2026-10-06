@@ -4,7 +4,8 @@ import IOKit
 
 private let vendorID: UInt16 = 0x15e4
 private let productID: UInt16 = 0x0079
-private let driverVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown"
+private let driverVersion = Bundle(path: "/Library/Audio/Plug-Ins/HAL/NumarkNS6M1.driver")?
+    .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unavailable"
 private let driverDeveloper = "Mauro Junior (@maurojuniorr)"
 private let audioDeviceUID = "io.github.maurojuniorr.numark-ns6.device"
 private let activeIOFramesProperty: AudioObjectPropertySelector = 0x6e733666 // 'ns6f'

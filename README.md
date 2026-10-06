@@ -11,11 +11,12 @@ Linux project is also still in progress. This repository adapts that shared
 hardware knowledge to macOS; it is not a port of Numark's discontinued driver
 and is not an official Numark or Ploytec product.
 
-> **Project status: experimental / alpha.** The driver has been exercised on
-> original NS6 hardware with Apple Silicon and macOS Sequoia, including
-> extended audio sessions. Compatibility and long-term behavior still need
-> testing across more systems and applications. Use it for testing and report
-> issues with logs and the macOS version.
+> **Project status: stable on the tested setup.** Release 0.2.111 was tested on
+> an original NS6 with an M1 Pro Mac running macOS Sequoia. In the latest
+> listening sessions, Mauro heard no audio clicks or glitches and the USB
+> connection LED stayed stable most of the time. Other Macs, USB setups, and
+> applications still need testing; please report issues with logs and the
+> macOS version.
 
 ## 👨‍🔧 About the project
 
@@ -36,8 +37,9 @@ Silicon Macs running macOS 15 or later.
 - **MIDI controls:** the driver reads the NS6's packed USB MIDI messages and
   publishes a **Numark NS6** CoreMIDI input. DJ software can send MIDI back to
   the controller's LEDs through the matching CoreMIDI output.
-- **NS6 Status app:** reports USB connection, firmware, audio format, and the
-  CoreAudio buffer cycle observed for the app using the active audio flow.
+- **NS6 Status app:** reports USB connection, the installed driver's version,
+  firmware, audio format, and the CoreAudio buffer cycle observed for the app
+  using the active audio flow.
 - **Audio recovery and diagnostics:** the USB transport can recover from
   transient device/interface loss and logs transfer health, queue underruns,
   packet errors, and feedback-endpoint readings for troubleshooting.
@@ -59,22 +61,13 @@ logged-in user session. This lets audio and MIDI share the device without two
 processes competing to open it.
 
 The USB audio schedule uses whole five- and six-frame packets at the NS6's
-44.1 kHz rate. The current 0.2.104 candidate adds a feedback-pattern scheduler:
-the adaptive build reads the controller's `0x81` endpoint and uses its frame
-reports to choose each millisecond's eight-packet frame pattern. The adaptive
-clock and its configurable output-rate floor remain experimental; build with
-`ADAPTIVE_CLOCK=1` to enable them. The default Makefile setting remains the
-fixed-clock fallback until the candidate completes longer hardware testing.
-
-In the October 6, 2026 hardware run on build 0.2.102, Mauro reported no audible
-clicks or pops. Health logs showed zero driver underruns, USB transfer errors,
-packet errors, or short packets, and bounded requested-versus-sent frame debt.
-Callback cadence still reached about 17 ms, and the feedback reader had four
-read errors. Build 0.2.104 adds the feedback-pattern scheduler and configurable
-minimum-rate floor; its clock regression tests and Apple Silicon build pass,
-but it still needs a longer hardware listening test. The driver logs callback
-cadence and work duration, queue depth, frame timestamps on delayed
-completions, packet/transfer errors, and recovery events.
+44.1 kHz rate. Release 0.2.111 uses the tested fixed-clock configuration by
+default. An optional feedback-pattern scheduler reads endpoint `0x81` and
+uses its frame reports to choose each millisecond's packet pattern; this
+adaptive clock remains experimental and can be enabled with
+`ADAPTIVE_CLOCK=1` when building from source. The driver logs callback
+cadence and work duration, queue depth, packet/transfer errors, and recovery
+events.
 
 ## ⚠️ Current limitations
 
@@ -84,9 +77,9 @@ completions, packet/transfer errors, and recovery events.
   `0x86` carries structured bulk data used by the waveform path, and the other
   endpoints are playback/MIDI. A Windows capture with known audio on the
   physical inputs is still needed to reconcile “Inputs: 2” with the USB traffic.
-- **Long-term audio stability is still under test.** The current test has been
-  clean by ear and the driver counters are clear, but callback timing varies
-  and the feedback reader recorded occasional errors.
+- **Audio stability beyond the tested setup is not yet established.** The
+  current hardware test was clean by ear, but more systems and long sessions
+  are needed to characterize rare failures.
 - NS6 Status reads a firmware-version property populated by a read-only
   vendor request. The connected NS6 returned `31 01 03 02 02`, matching
   `1.0.3 (K1)` from the original Windows panel; other firmware variants have
@@ -132,7 +125,7 @@ make usb-work-interval-regression-test
 To create a local installer package:
 
 ```sh
-make ADAPTIVE_CLOCK=1 package VERSION=0.2.104
+make package VERSION=0.2.111
 ```
 
 The package is written to `coreaudio/dist/`. For USB descriptor diagnostics,
