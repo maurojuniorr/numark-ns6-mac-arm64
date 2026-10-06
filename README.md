@@ -57,17 +57,35 @@ forwarded to a companion process, which publishes the CoreMIDI ports in the
 logged-in user session. This lets audio and MIDI share the device without two
 processes competing to open it.
 
-The USB audio schedule uses a fractional frame accumulator to alternate
-five- and six-frame packets, averaging 44,100 frames per second. Endpoint
-`0x81` is sampled for diagnostics; its readings are **not yet used** to adjust
-playback timing.
+The USB audio schedule uses a fractional frame accumulator to send whole
+five- and six-frame packets at the NS6's 44.1 kHz rate. The adaptive build reads
+the controller's `0x81` feedback endpoint and adjusts the source-frame step
+against the USB frame schedule while keeping output within 44,000–44,100.3
+frames per second. Build it with `ADAPTIVE_CLOCK=1`; it remains an explicit
+experimental option while it is tested with more applications and sessions.
+
+On October 6, 2026, a live hardware check of build 0.2.102 showed feedback
+averages around 44,099.6–44,100.6 frames per second, a stable requested-versus-
+sent frame difference (about 1,411 frames), and no logged USB transfer,
+isochronous packet, or driver underrun errors during the observed window. USB
+callback timing was still variable, so this check is evidence that the clock
+debt stopped accumulating, not proof that every audible artifact is resolved.
+The driver logs callback cadence and work duration, queue depth, frame
+timestamps on delayed completions, packet/transfer errors, and recovery events
+to help investigate remaining glitches.
 
 ## ⚠️ Current limitations
 
 - **Audio capture is not implemented** as a macOS input device. The NS6's two
   hardware inputs are not available to applications through this driver.
-- The `0x81` feedback endpoint is monitored, but adaptive clock correction has
-  not been implemented.
+- **Long-term audio stability is still under test.** The latest adaptive-clock
+  check showed stable frame debt and clean USB/underrun counters, but callback
+  timing varies and occasional audible artifacts have not been conclusively
+  eliminated.
+- The app-selected CoreAudio period and the driver's USB startup pre-buffer
+  are separate settings. The driver's status app does not override the buffer
+  selected by Mixxx or another client; requests and active I/O information are
+  exposed in CoreAudio diagnostics and Status.
 - The firmware version is not queried from the controller yet; NS6 Status
   reports it as unavailable.
 - The separate `tools/ns6-probe` program only reads USB descriptors. It is a
@@ -100,10 +118,18 @@ make
 make midi-parser-test
 ```
 
+The adaptive-clock build and its regression tests can be checked with:
+
+```sh
+make ADAPTIVE_CLOCK=1 clock-control-test
+make clock-control-fixed-test
+make usb-work-interval-regression-test
+```
+
 To create a local installer package:
 
 ```sh
-make package VERSION=0.2.50
+make ADAPTIVE_CLOCK=1 package VERSION=0.2.102
 ```
 
 The package is written to `coreaudio/dist/`. For USB descriptor diagnostics,
