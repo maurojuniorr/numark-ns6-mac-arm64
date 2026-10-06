@@ -36,9 +36,8 @@ Silicon Macs running macOS 15 or later.
 - **MIDI controls:** the driver reads the NS6's packed USB MIDI messages and
   publishes a **Numark NS6** CoreMIDI input. DJ software can send MIDI back to
   the controller's LEDs through the matching CoreMIDI output.
-- **NS6 Status app:** reports USB connection and audio format details,
-  and the active audio flow when available. It also lets you choose the USB
-  startup pre-buffer and apply the change by restarting the audio transport.
+- **NS6 Status app:** reports USB connection, firmware, audio format, and the
+  CoreAudio buffer cycle observed for the app using the active audio flow.
 - **Audio recovery and diagnostics:** the USB transport can recover from
   transient device/interface loss and logs transfer health, queue underruns,
   packet errors, and feedback-endpoint readings for troubleshooting.
@@ -46,9 +45,8 @@ Silicon Macs running macOS 15 or later.
 **Mixxx controls its own CoreAudio buffer period.** The HAL driver now accepts
 the frame size requested by the client and returns that active value through
 CoreAudio, instead of reporting a fixed 96-frame period. NS6 Status reports the
-active flow's frame count and corresponding latency; during hardware testing,
-that latency matched Mixxx's report. The Status app's USB startup pre-buffer is
-a separate driver setting and does not override Mixxx's choice.
+observed cycle size and corresponding latency for the current flow; during
+hardware testing, that latency matched Mixxx's report.
 
 ## 🏗️ How the driver is put together
 

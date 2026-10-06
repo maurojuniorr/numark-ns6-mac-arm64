@@ -14,8 +14,8 @@ The HAL accepts CoreAudio clients' buffer-frame-size requests, including the
 period selected in Mixxx, and returns the active frame count through the same
 property instead of forcing a constant 96-frame report. NS6 Status shows the
 active stream period and its calculated latency; in hardware testing it matched
-Mixxx's reported latency. The Status app's USB startup pre-buffer is a separate
-driver-side control and does not change the client's period. At 44.1 kHz, 49,
+Mixxx's reported latency. The Status app shows the active CoreAudio cycle for
+the current app rather than offering a startup pre-buffer control. At 44.1 kHz, 49,
 128, 192, 256, 512, and 1024 frames correspond to approximately 1.1, 2.9, 4.4,
 5.8, 11.6, and 23.2 ms per buffer. The worker converts the CoreAudio mix to the
 packed 24-bit format used by the NS6.
@@ -115,8 +115,8 @@ sudo installer -pkg dist/NumarkNS6-0.2.102.pkg -target /
 It installs the arm64 HAL bundle in `/Library/Audio/Plug-Ins/HAL` and restarts
 only `coreaudiod`. It also adds **Numark NS6 Status** to Applications. The app
 shows live USB connection state, output format, channel count, and the driver
-version. Firmware is deliberately shown as not queried until the driver can
-read it from the hardware. The package is locally built and unsigned for
+version. Firmware is read from the NS6 through a vendor request and displayed
+in Status (the connected unit reported `1.0.3 (K1)`). The package is locally built and unsigned for
 distribution; it does not require or include Numark's legacy Intel kext.
 
 To remove this build:
