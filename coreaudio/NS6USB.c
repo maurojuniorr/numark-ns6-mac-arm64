@@ -321,11 +321,13 @@ static void feedback_complete(void *reference,IOReturn status,void *argument){
         const unsigned char *packet=slot->data+p*feedback_packet_bytes;
         feedback_last_sample[0]=packet[0];feedback_last_sample[1]=packet[1];feedback_last_sample[2]=packet[2];
         atomic_fetch_add_explicit(&feedback_samples,1,memory_order_relaxed);
+        bool valid_clock_feedback=packet[0]>=42&&packet[0]<=46;
         bool was_locked=ns6_clock_control_is_locked(&clock_control);
-        if(packet[0]==44){atomic_fetch_add_explicit(&feedback_44_frames,1,memory_order_relaxed);ns6_clock_control_observe(&clock_control,packet[0]);}
-        else if(packet[0]==45){atomic_fetch_add_explicit(&feedback_45_frames,1,memory_order_relaxed);ns6_clock_control_observe(&clock_control,packet[0]);}
+        if(packet[0]==44){atomic_fetch_add_explicit(&feedback_44_frames,1,memory_order_relaxed);}
+        else if(packet[0]==45){atomic_fetch_add_explicit(&feedback_45_frames,1,memory_order_relaxed);}
         else atomic_fetch_add_explicit(&feedback_other_values,1,memory_order_relaxed);
-        if(packet[0]==44||packet[0]==45)
+        if(valid_clock_feedback)ns6_clock_control_observe(&clock_control,packet[0]);
+        if(valid_clock_feedback)
             atomic_store_explicit(&feedback_last_valid_ms,monotonic_ms(),memory_order_release);
         if(!was_locked&&ns6_clock_control_is_locked(&clock_control))
             os_log(OS_LOG_DEFAULT,"Numark NS6 USB feedback active: %.3f Hz diagnostic; clock mode %{public}s",(double)ns6_clock_control_rate_millihz(&clock_control)/1000.0,ns6_clock_control_is_adaptive_enabled()?"adaptive":"fixed nominal (diagnostic only)");
@@ -606,7 +608,7 @@ static void *worker(void *unused){
         }
         atomic_store_explicit(&waveform_completions,0,memory_order_relaxed);atomic_store_explicit(&waveform_errors,0,memory_order_relaxed);atomic_store_explicit(&waveform_last_log_ms,0,memory_order_relaxed);
         for(unsigned i=0;i<SLOT_COUNT;++i)submit(&slots[i]);
-        os_log(OS_LOG_DEFAULT,"Numark NS6 diagnostic USB OUT queue: %u transfers x %u microframes (%u queued microframes); feedback polling %{public}s",(unsigned)SLOT_COUNT,(unsigned)PACKETS,(unsigned)(SLOT_COUNT*PACKETS),ns6_usb_feedback_reader_enabled()?"enabled":"disabled");
+        os_log(OS_LOG_DEFAULT,"Numark NS6 diagnostic USB OUT queue: %u transfers x %u microframes (%u queued microframes); feedback polling %{public}s; Hopper frame-pattern scheduler %{public}s",(unsigned)SLOT_COUNT,(unsigned)PACKETS,(unsigned)(SLOT_COUNT*PACKETS),ns6_usb_feedback_reader_enabled()?"enabled":"disabled",ns6_clock_control_is_feedback_pattern_enabled()?"enabled":"disabled");
         for(unsigned i=0;i<FEEDBACK_SLOT_COUNT;++i)feedback_submit(&feedback[i]);
         bool midi_session_active=ns6_midi_start(interface,run_loop);
         if(midi_session_active){

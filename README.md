@@ -60,22 +60,23 @@ forwarded to a companion process, which publishes the CoreMIDI ports in the
 logged-in user session. This lets audio and MIDI share the device without two
 processes competing to open it.
 
-The USB audio schedule uses a fractional frame accumulator to send whole
-five- and six-frame packets at the NS6's 44.1 kHz rate. The adaptive build reads
-the controller's `0x81` feedback endpoint and adjusts the source-frame step
-against the USB frame schedule while keeping output within 44,000–44,100.3
-frames per second. Build it with `ADAPTIVE_CLOCK=1`; it remains an explicit
-experimental option while it is tested with more applications and sessions.
+The USB audio schedule uses whole five- and six-frame packets at the NS6's
+44.1 kHz rate. The current 0.2.104 candidate adds a feedback-pattern scheduler:
+the adaptive build reads the controller's `0x81` endpoint and uses its frame
+reports to choose each millisecond's eight-packet frame pattern. The adaptive
+clock and its configurable output-rate floor remain experimental; build with
+`ADAPTIVE_CLOCK=1` to enable them. The default Makefile setting remains the
+fixed-clock fallback until the candidate completes longer hardware testing.
 
-During the October 6, 2026 follow-up test on build 0.2.102, Mauro reported no
-audible clicks or pops. Recent health logs showed zero driver underruns, USB
-transfer errors, packet errors, or short packets; the requested-versus-sent
-frame debt stayed bounded. Callback cadence still reached about 17 ms, and the
-feedback reader had four read errors in the observed run, so longer listening
-tests remain important. These results describe the current test, not a guarantee
-that artifacts can never return. The driver logs callback cadence and work
-duration, queue depth, frame timestamps on delayed completions, packet/transfer
-errors, and recovery events to investigate future glitches.
+In the October 6, 2026 hardware run on build 0.2.102, Mauro reported no audible
+clicks or pops. Health logs showed zero driver underruns, USB transfer errors,
+packet errors, or short packets, and bounded requested-versus-sent frame debt.
+Callback cadence still reached about 17 ms, and the feedback reader had four
+read errors. Build 0.2.104 adds the feedback-pattern scheduler and configurable
+minimum-rate floor; its clock regression tests and Apple Silicon build pass,
+but it still needs a longer hardware listening test. The driver logs callback
+cadence and work duration, queue depth, frame timestamps on delayed
+completions, packet/transfer errors, and recovery events.
 
 ## ⚠️ Current limitations
 
@@ -127,7 +128,7 @@ make usb-work-interval-regression-test
 To create a local installer package:
 
 ```sh
-make ADAPTIVE_CLOCK=1 package VERSION=0.2.102
+make ADAPTIVE_CLOCK=1 package VERSION=0.2.104
 ```
 
 The package is written to `coreaudio/dist/`. For USB descriptor diagnostics,

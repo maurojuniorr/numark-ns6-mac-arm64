@@ -3,7 +3,11 @@
 #include <string.h>
 
 #define NS6_NOMINAL_RATE_MILLIHZ UINT64_C(44100000)
-#define NS6_MIN_OUTPUT_RATE_MILLIHZ UINT64_C(44000000)
+#define NS6_FEEDBACK_MIN_FRAMES_PER_MS 42u
+#define NS6_FEEDBACK_MAX_FRAMES_PER_MS 46u
+#ifndef NS6_ADAPTIVE_CLOCK_MIN_OUTPUT_RATE_MILLIHZ
+#define NS6_ADAPTIVE_CLOCK_MIN_OUTPUT_RATE_MILLIHZ UINT64_C(44000000)
+#endif
 #define NS6_MAX_OUTPUT_RATE_MILLIHZ UINT64_C(44100300)
 void ns6_clock_control_init(NS6ClockControl *control) {
     if (!control) return;
@@ -24,10 +28,14 @@ void ns6_clock_control_reset_feedback(NS6ClockControl *control) {
     control->locked = false;
     control->target_frames_per_ms = 44;
     control->adaptive_fraction_millionths = 0;
+    control->fixed_fraction = 0;
+    control->pattern_queue_read = 0;
+    control->pattern_queue_count = 0;
 }
 
 void ns6_clock_control_observe(NS6ClockControl *control, uint8_t frames_per_ms) {
-    if (!control || (frames_per_ms != 44 && frames_per_ms != 45)) return;
+    if (!control || frames_per_ms < NS6_FEEDBACK_MIN_FRAMES_PER_MS ||
+        frames_per_ms > NS6_FEEDBACK_MAX_FRAMES_PER_MS) return;
 
     control->target_frames_per_ms = frames_per_ms;
     control->requested_total += frames_per_ms;
@@ -41,6 +49,22 @@ void ns6_clock_control_observe(NS6ClockControl *control, uint8_t frames_per_ms) 
     control->feedback_sum += frames_per_ms;
     control->feedback_index = (control->feedback_index + 1) % NS6_FEEDBACK_WINDOW;
 
+#if NS6_ADAPTIVE_CLOCK_ENABLED && NS6_FEEDBACK_PATTERN_SCHEDULER_ENABLED
+    /* The kext uses every valid feedback byte as the target for the next
+       millisecond. Keep reports in order until the matching OUT microframes
+       are prepared; when callbacks briefly outrun fill(), retain the newest
+       reports rather than applying stale feedback. */
+    if (control->pattern_queue_count == NS6_FEEDBACK_PATTERN_QUEUE_CAPACITY) {
+        control->pattern_queue_read =
+            (control->pattern_queue_read + 1u) % NS6_FEEDBACK_PATTERN_QUEUE_CAPACITY;
+        --control->pattern_queue_count;
+    }
+    uint16_t write_index = (uint16_t)((control->pattern_queue_read +
+        control->pattern_queue_count) % NS6_FEEDBACK_PATTERN_QUEUE_CAPACITY);
+    control->pattern_queue[write_index] = frames_per_ms;
+    ++control->pattern_queue_count;
+#endif
+
     /* Diagnostic only. Clock correction uses cumulative requested/sent debt. */
     if (control->feedback_count == NS6_FEEDBACK_WINDOW)
         control->rate_millihz = (control->feedback_sum * UINT64_C(1000000)) /
@@ -51,6 +75,31 @@ void ns6_clock_control_next_millisecond(NS6ClockControl *control, unsigned packe
     if (!control || !packet_frames) return;
 
     unsigned frames_per_ms;
+#if NS6_ADAPTIVE_CLOCK_ENABLED && NS6_FEEDBACK_PATTERN_SCHEDULER_ENABLED
+    if (control->pattern_queue_count) {
+        frames_per_ms = control->pattern_queue[control->pattern_queue_read];
+        control->pattern_queue_read =
+            (control->pattern_queue_read + 1u) % NS6_FEEDBACK_PATTERN_QUEUE_CAPACITY;
+        --control->pattern_queue_count;
+    } else {
+        /* Before feedback arrives, keep the nominal 44.1 kHz cadence. */
+        control->fixed_fraction += 100;
+        frames_per_ms = 44;
+        if (control->fixed_fraction >= 1000) {
+            control->fixed_fraction -= 1000;
+            ++frames_per_ms;
+        }
+    }
+    static const uint8_t patterns[5][8] = {
+        {6, 5, 5, 5, 6, 5, 5, 5}, /* 42 frames */
+        {5, 5, 6, 5, 6, 5, 6, 5}, /* 43 frames */
+        {6, 5, 6, 5, 6, 5, 6, 5}, /* 44 frames */
+        {6, 6, 5, 6, 5, 6, 5, 6}, /* 45 frames */
+        {5, 6, 6, 6, 5, 6, 6, 6}, /* 46 frames */
+    };
+    for (unsigned packet = 0; packet < 8; ++packet)
+        packet_frames[packet] = patterns[frames_per_ms - NS6_FEEDBACK_MIN_FRAMES_PER_MS][packet];
+#else
 #if NS6_ADAPTIVE_CLOCK_ENABLED
     /* A USB OUT transfer is prepared in blocks, so one latest 44/45 feedback
        report can cover several milliseconds. Repeating that one value across
@@ -85,6 +134,7 @@ void ns6_clock_control_next_millisecond(NS6ClockControl *control, unsigned packe
             accumulator -= 8;
         }
     }
+#endif
     control->sent_total += frames_per_ms;
 }
 
@@ -115,12 +165,18 @@ bool ns6_clock_control_is_adaptive_enabled(void) {
     return NS6_ADAPTIVE_CLOCK_ENABLED != 0;
 }
 
+bool ns6_clock_control_is_feedback_pattern_enabled(void) {
+    return NS6_ADAPTIVE_CLOCK_ENABLED != 0 &&
+           NS6_FEEDBACK_PATTERN_SCHEDULER_ENABLED != 0;
+}
+
 uint64_t ns6_clock_control_output_rate_millihz(const NS6ClockControl *control) {
     uint64_t rate = NS6_NOMINAL_RATE_MILLIHZ;
 #if NS6_ADAPTIVE_CLOCK_ENABLED
     if (control && control->locked && control->rate_millihz)
         rate = control->rate_millihz;
-    if (rate < NS6_MIN_OUTPUT_RATE_MILLIHZ) rate = NS6_MIN_OUTPUT_RATE_MILLIHZ;
+    if (rate < NS6_ADAPTIVE_CLOCK_MIN_OUTPUT_RATE_MILLIHZ)
+        rate = NS6_ADAPTIVE_CLOCK_MIN_OUTPUT_RATE_MILLIHZ;
     if (rate > NS6_MAX_OUTPUT_RATE_MILLIHZ) rate = NS6_MAX_OUTPUT_RATE_MILLIHZ;
 #else
     (void)control;
