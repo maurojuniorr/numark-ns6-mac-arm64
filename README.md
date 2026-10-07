@@ -11,12 +11,12 @@ Linux project is also still in progress. This repository adapts that shared
 hardware knowledge to macOS; it is not a port of Numark's discontinued driver
 and is not an official Numark or Ploytec product.
 
-> **Project status: stable on the tested setup.** Release 0.2.111 was tested on
-> an original NS6 with an M1 Pro Mac running macOS Sequoia. In the latest
-> listening sessions, Mauro heard no audio clicks or glitches and the USB
-> connection LED stayed stable most of the time. Other Macs, USB setups, and
-> applications still need testing; please report issues with logs and the
-> macOS version.
+> **Project status: active hardware testing.** The default build now follows
+> the NS6's USB clock feedback instead of assuming an exact 44.1 kHz hardware
+> clock. This was enabled after live logs showed the fixed-rate build's sent
+> frame count drifting from the device's feedback. The adaptive build has been
+> tested on an original NS6 with an M1 Pro Mac running macOS Sequoia; longer
+> listening tests are ongoing.
 
 ## 👨‍🔧 About the project
 
@@ -60,14 +60,12 @@ forwarded to a companion process, which publishes the CoreMIDI ports in the
 logged-in user session. This lets audio and MIDI share the device without two
 processes competing to open it.
 
-The USB audio schedule uses whole five- and six-frame packets at the NS6's
-44.1 kHz rate. Release 0.2.111 uses the tested fixed-clock configuration by
-default. An optional feedback-pattern scheduler reads endpoint `0x81` and
-uses its frame reports to choose each millisecond's packet pattern; this
-adaptive clock remains experimental and can be enabled with
-`ADAPTIVE_CLOCK=1` when building from source. The driver logs callback
-cadence and work duration, queue depth, packet/transfer errors, and recovery
-events.
+The USB audio schedule uses whole five- and six-frame packets, with endpoint
+`0x81` feedback selecting the frame pattern for each millisecond. Adaptive
+clocking is enabled by default in source builds and release packages; the
+resampler follows the transmitted rate while a bounded queue trim handles
+residual host/device drift. The driver logs callback cadence and work
+duration, queue depth, packet/transfer errors, and recovery events.
 
 ## ⚠️ Current limitations
 
@@ -125,7 +123,7 @@ make usb-work-interval-regression-test
 To create a local installer package:
 
 ```sh
-make package VERSION=0.2.111
+make package
 ```
 
 The package is written to `coreaudio/dist/`. For USB descriptor diagnostics,

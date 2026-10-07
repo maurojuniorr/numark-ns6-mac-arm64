@@ -30,19 +30,18 @@ between empty packets and live audio while CoreAudio is filling its first
 buffers.
 
 The USB worker emits whole audio frames in groups of eight microframes. The
-fixed build uses a fractional 44.1-frame-per-millisecond cadence. The adaptive
-build reads NS6 feedback endpoint `0x81` and tracks its rolling rate, keeping
-the transmitted rate within 44,000.0–44,100.3 frames/s. Fractional packet
-scheduling distributes that rate across USB output blocks instead of repeating
-one feedback byte across a whole block. The resampler follows the transmitted
-rate, with a bounded queue-occupancy trim bridging to CoreAudio's 44.1 kHz
-stream. The feedback reader and packet layout follow Gregory Senay's
-hardware-verified findings; enable adaptive mode for testing with
-`make ADAPTIVE_CLOCK=1`.
+default build reads NS6 feedback endpoint `0x81` and tracks its rolling rate,
+keeping the transmitted rate within 44,000.0–44,100.3 frames/s. Fractional
+packet scheduling distributes that rate across USB output blocks instead of
+repeating one feedback byte across a whole block. The resampler follows the
+transmitted rate, with a bounded queue-occupancy trim bridging to CoreAudio's
+44.1 kHz stream. The feedback reader and packet layout follow Gregory Senay's
+hardware-verified findings. Use `ADAPTIVE_CLOCK=0` only for diagnostic builds.
 
-During the October 6, 2026 hardware listening sessions, Mauro reported no
-audible clicks or glitches with the fixed-clock build and observed a mostly
-steady USB connection LED. The adaptive build remains a separate test path.
+During October 6, 2026 hardware testing, logs from the fixed-rate build showed
+the device feedback and host output diverging while the reported audio hiss
+was present. Adaptive clocking is now the default so packet cadence follows
+the NS6 feedback; listening tests are ongoing.
 
 The former Numark package included an Intel-only Ploytec kext. This project
 does not load or depend on it.
@@ -101,10 +100,10 @@ separate from Numark's old Intel-only bundle.
 Build an adaptive macOS installer package with:
 
 ```sh
-make ADAPTIVE_CLOCK=1 package VERSION=0.2.102
+make package
 ```
 
-The package is written to `dist/NumarkNS6-0.2.102.pkg`. Open it in Finder or
+The package is written to `dist/NumarkNS6-$(VERSION).pkg`. Open it in Finder or
 install it from Terminal with:
 
 ```sh
