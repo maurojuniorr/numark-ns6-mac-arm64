@@ -3,44 +3,27 @@
 #include <assert.h>
 #include <stdio.h>
 
-static void test_healthy_queue_plays_immediately(void) {
-    NS6AudioRecovery state;
-    ns6_audio_recovery_init(&state);
-    assert(!ns6_audio_recovery_needs_silence(&state, 4096));
-    assert(ns6_audio_recovery_next_gain(&state) == 1.0);
-}
-
-static void test_low_queue_rebuffers_once_before_resuming(void) {
-    NS6AudioRecovery state;
-    ns6_audio_recovery_init(&state);
-
-    assert(ns6_audio_recovery_needs_silence(&state, 255));
-    assert(ns6_audio_recovery_needs_silence(&state, 900));
-    assert(!ns6_audio_recovery_needs_silence(&state, 1024));
-    assert(!ns6_audio_recovery_needs_silence(&state, 900));
-}
-
-static void test_resume_uses_short_monotonic_fade(void) {
-    NS6AudioRecovery state;
-    ns6_audio_recovery_init(&state);
-    assert(ns6_audio_recovery_needs_silence(&state, 1));
-    assert(!ns6_audio_recovery_needs_silence(&state, 1024));
-
-    double previous = 0.0;
-    for (unsigned frame = 0; frame < NS6_RECOVERY_FADE_FRAMES; ++frame) {
-        double gain = ns6_audio_recovery_next_gain(&state);
-        assert(gain > previous);
-        assert(gain <= 1.0);
-        previous = gain;
+static void test_missing_audio_tail_fades_to_zero(void) {
+    const uint32_t missing_frames = 6;
+    double previous_gain = 1.0;
+    for (uint32_t frame = 0; frame < missing_frames; ++frame) {
+        double gain = ns6_audio_recovery_underrun_gain(frame, missing_frames);
+        assert(gain < previous_gain);
+        assert(gain >= 0.0);
+        previous_gain = gain;
     }
-    assert(previous == 1.0);
-    assert(ns6_audio_recovery_next_gain(&state) == 1.0);
+    assert(previous_gain == 0.0);
+}
+
+static void test_full_packet_loss_fades_the_last_sample_to_zero(void) {
+    const uint32_t missing_frames = 44;
+    assert(ns6_audio_recovery_underrun_gain(0, missing_frames) > 0.9);
+    assert(ns6_audio_recovery_underrun_gain(missing_frames - 1, missing_frames) == 0.0);
 }
 
 int main(void) {
-    test_healthy_queue_plays_immediately();
-    test_low_queue_rebuffers_once_before_resuming();
-    test_resume_uses_short_monotonic_fade();
+    test_missing_audio_tail_fades_to_zero();
+    test_full_packet_loss_fades_the_last_sample_to_zero();
     puts("NS6 audio recovery tests passed");
     return 0;
 }

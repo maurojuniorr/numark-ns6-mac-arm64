@@ -11,12 +11,23 @@ Linux project is also still in progress. This repository adapts that shared
 hardware knowledge to macOS; it is not a port of Numark's discontinued driver
 and is not an official Numark or Ploytec product.
 
-> **Project status: active hardware testing.** The default build now follows
-> the NS6's USB clock feedback instead of assuming an exact 44.1 kHz hardware
-> clock. This was enabled after live logs showed the fixed-rate build's sent
-> frame count drifting from the device's feedback. The adaptive build has been
-> tested on an original NS6 with an M1 Pro Mac running macOS Sequoia; longer
-> listening tests are ongoing.
+> **Current release: 0.2.123.** The adaptive-clock driver has been tested with
+> an original NS6 on an M1 Pro Mac running macOS Sequoia and has been stable in
+> the maintainer's recent sessions. Testing with other Macs, macOS releases,
+> and audio applications is still welcome.
+
+## ✨ What's new in 0.2.123
+
+- Audio recovery no longer inserts a protective rebuffer or fade-in when the
+  queue gets low. If a USB output block is genuinely short, only its missing
+  tail is faded down from the last valid sample.
+- CoreAudio `WriteMix` diagnostics now record each client's callback frame
+  count, timing between callbacks, maximum enqueue duration, and callback
+  periods exceeded. These measurements are written to the system log to help
+  distinguish late audio callbacks from USB transfer faults.
+- The MIDI bridge LaunchAgent targets the app bundle installed by the package,
+  and the installer removes an obsolete localized app copy to avoid leaving a
+  stale bridge executable behind.
 
 ## 👨‍🔧 About the project
 
@@ -64,8 +75,9 @@ The USB audio schedule uses whole five- and six-frame packets, with endpoint
 `0x81` feedback selecting the frame pattern for each millisecond. Adaptive
 clocking is enabled by default in source builds and release packages; the
 resampler follows the transmitted rate while a bounded queue trim handles
-residual host/device drift. The driver logs callback cadence and work
-duration, queue depth, packet/transfer errors, and recovery events.
+residual host/device drift. The driver logs USB callback cadence and work
+duration, CoreAudio `WriteMix` cadence and enqueue duration, queue depth,
+packet/transfer errors, and recovery events.
 
 ## ⚠️ Current limitations
 
@@ -75,9 +87,9 @@ duration, queue depth, packet/transfer errors, and recovery events.
   `0x86` carries structured bulk data used by the waveform path, and the other
   endpoints are playback/MIDI. A Windows capture with known audio on the
   physical inputs is still needed to reconcile “Inputs: 2” with the USB traffic.
-- **Audio stability beyond the tested setup is not yet established.** The
-  current hardware test was clean by ear, but more systems and long sessions
-  are needed to characterize rare failures.
+- **Hardware coverage is limited.** The current release has been stable in
+  recent sessions on the maintainer's M1 Pro/Sequoia setup; testing on other
+  systems and longer sessions is still needed to characterize rare failures.
 - NS6 Status reads a firmware-version property populated by a read-only
   vendor request. The connected NS6 returned `31 01 03 02 02`, matching
   `1.0.3 (K1)` from the original Windows panel; other firmware variants have

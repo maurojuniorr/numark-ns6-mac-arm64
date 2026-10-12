@@ -24,10 +24,11 @@ packed 24-bit format used by the NS6.
 Channels 1/2 feed Master and channels 3/4 feed Headphones independently, so
 DJ software can route its main mix and cue mix separately.
 
-At stream start, the worker waits briefly for 2048 PCM frames before submitting
-the first eight USB transfers. This prevents the device from alternating
-between empty packets and live audio while CoreAudio is filling its first
-buffers.
+At stream start or resume, the worker waits until its internal queue contains
+at least 1024 PCM frames (or the configured startup prebuffer, if larger)
+before submitting live audio. This is an internal USB-queue priming threshold;
+it does not override the buffer period requested by Mixxx or another
+CoreAudio client.
 
 The USB worker emits whole audio frames in groups of eight microframes. The
 default build reads NS6 feedback endpoint `0x81` and tracks its rolling rate,
@@ -50,9 +51,16 @@ does not load or depend on it.
 
 The USB worker periodically logs transfer health, queued frames, underrun event
 and frame counts, largest underrun burst, isochronous packet errors, short
-output packets, callback cadence, and callback work duration. Underruns and
-packet faults also produce rate-limited detail messages when they occur.
-CoreAudio queue rejections are logged separately.
+output packets, and USB callback cadence and work duration. CoreAudio
+`WriteMix` calls are also measured per client: mean frames per callback, mean
+and maximum callback gap, maximum enqueue duration, and the number of calls
+whose enqueue work exceeded that callback's audio period. Underruns and packet
+faults also produce rate-limited detail messages when they occur. CoreAudio
+queue rejections are logged separately.
+
+When a USB output block is short, the worker fades only the missing tail from
+the last valid sample toward silence. It does not start a protective rebuffer
+or fade in merely because the queue drops below a low-water threshold.
 After a glitch, collect the matching system log entries with:
 
 ```sh

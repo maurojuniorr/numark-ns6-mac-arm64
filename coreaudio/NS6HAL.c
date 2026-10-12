@@ -3,6 +3,7 @@
 #include "NS6BufferFrameSize.h"
 #include "NS6ZeroTimestamp.h"
 #include "NS6ActiveFlow.h"
+#include "NS6IOMetrics.h"
 #include <CoreAudio/AudioHardware.h>
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <CoreFoundation/CFPlugInCOM.h>
@@ -48,6 +49,8 @@ static UInt32 references=1,seed=1;
 static atomic_uint io_clients;
 static UInt64 anchor_host_time;
 static mach_timebase_info_data_t timebase;
+static void initialize_io_metrics(void){ns6_io_metrics_init(&ns6_io_metrics);}
+static uint64_t io_monotonic_ns(void){struct timespec now;if(clock_gettime(CLOCK_MONOTONIC,&now)!=0)return 0;return (uint64_t)now.tv_sec*1000000000ull+(uint64_t)now.tv_nsec;}
 static IONotificationPortRef usb_notifications;
 static io_iterator_t usb_added,usb_removed;
 static atomic_bool device_present;
@@ -55,6 +58,7 @@ static atomic_uint enqueue_failures;
 static atomic_uint_fast64_t last_enqueue_log_ms;
 static pthread_once_t usb_monitor_once=PTHREAD_ONCE_INIT;
 static pthread_once_t default_output_monitor_once=PTHREAD_ONCE_INIT;
+static pthread_once_t io_metrics_once=PTHREAD_ONCE_INIT;
 static pthread_mutex_t stream_lock=PTHREAD_MUTEX_INITIALIZER;
 static bool transport_open;
 static AudioStreamBasicDescription stream_format={SAMPLE_RATE,kAudioFormatLinearPCM,kAudioFormatFlagIsFloat|kAudioFormatFlagsNativeEndian|kAudioFormatFlagIsPacked,16,1,16,CHANNELS,32,0};
@@ -238,6 +242,7 @@ static void *restart_usb_for_buffer(void *unused){(void)unused;pthread_mutex_loc
 static OSStatus start_io(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32 client){
     (void)d;
     if(object!=DEVICE_ID)return kAudioHardwareBadObjectError;
+    pthread_once(&io_metrics_once,initialize_io_metrics);
     if(!atomic_load(&device_present)){os_log_error(OS_LOG_DEFAULT,"Numark NS6 start_io refused: USB device absent");return kAudioHardwareNotRunningError;}
     pthread_mutex_lock(&stream_lock);
     unsigned clients=atomic_load_explicit(&io_clients,memory_order_acquire);
@@ -280,11 +285,16 @@ static OSStatus zero_timestamp(AudioServerPlugInDriverRef d,AudioObjectID object
 static OSStatus will_do(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32 client,UInt32 operation,Boolean *will,Boolean *in_place){(void)d;(void)object;(void)client;if(!will||!in_place)return kAudioHardwareIllegalOperationError;*will=operation==kAudioServerPlugInIOOperationWriteMix;*in_place=true;return 0;}
 static OSStatus begin_io(AudioServerPlugInDriverRef d,AudioObjectID o,UInt32 c,UInt32 op,UInt32 frames,const AudioServerPlugInIOCycleInfo*i){(void)d;(void)i;if(o==DEVICE_ID&&op==kAudioServerPlugInIOOperationWriteMix&&frames)ns6_active_flow_record(&active_flow,frames,c,mach_absolute_time());return 0;}
 static OSStatus do_io(AudioServerPlugInDriverRef d,AudioObjectID object,AudioObjectID stream,UInt32 client,UInt32 operation,UInt32 frames,const AudioServerPlugInIOCycleInfo*i,void *main_buffer,void *secondary){
-    (void)d;(void)client;(void)i;(void)secondary;
+    (void)d;(void)secondary;
     if(object!=DEVICE_ID||stream!=STREAM_ID)return kAudioHardwareBadObjectError;
     if(operation==kAudioServerPlugInIOOperationWriteMix){
         ns6_active_flow_record(&active_flow,frames,client,mach_absolute_time());
+        uint64_t callback_start_ns=io_monotonic_ns();
         bool accepted=ns6_transport_enqueue(main_buffer,frames,&stream_format);
+        uint64_t callback_end_ns=io_monotonic_ns();
+        uint64_t callback_ns=callback_end_ns>=callback_start_ns?callback_end_ns-callback_start_ns:0;
+        uint64_t deadline_ns=frames?(uint64_t)frames*1000000000ull/(uint64_t)SAMPLE_RATE:0;
+        ns6_io_metrics_record_timed(&ns6_io_metrics,client,frames,i?i->mIOCycleCounter:0,callback_start_ns,callback_ns,deadline_ns);
         if(!accepted){
             unsigned failures=atomic_fetch_add(&enqueue_failures,1)+1;
             uint64_t now=mach_absolute_time();double now_ms=(double)now*timebase.numer/timebase.denom/1e6;

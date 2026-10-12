@@ -15,6 +15,12 @@ typedef struct {
     atomic_uint_fast64_t last_cycle;
     atomic_uint_fast64_t duplicate_cycles;
     atomic_uint_fast64_t skipped_cycles;
+    atomic_uint_fast64_t last_callback_start_ns;
+    atomic_uint_fast64_t interval_count;
+    atomic_uint_fast64_t interval_total_ns;
+    atomic_uint_fast64_t max_interval_ns;
+    atomic_uint_fast64_t max_callback_ns;
+    atomic_uint_fast64_t deadline_misses;
 } NS6IOClientMetrics;
 
 typedef struct {
@@ -28,13 +34,24 @@ typedef struct {
     uint64_t last_cycle;
     uint64_t duplicate_cycles;
     uint64_t skipped_cycles;
+    uint64_t interval_count;
+    uint64_t interval_total_ns;
+    uint64_t max_interval_ns;
+    uint64_t max_callback_ns;
+    uint64_t deadline_misses;
 } NS6IOMetricsSnapshot;
 
 void ns6_io_metrics_init(NS6IOMetrics *metrics);
 void ns6_io_metrics_record(NS6IOMetrics *metrics, uint32_t client_id,
                            uint32_t frames, uint64_t cycle);
+void ns6_io_metrics_record_timed(NS6IOMetrics *metrics, uint32_t client_id,
+                                 uint32_t frames, uint64_t cycle,
+                                 uint64_t start_ns, uint64_t callback_ns,
+                                 uint64_t deadline_ns);
 size_t ns6_io_metrics_take_snapshot(NS6IOMetrics *metrics,
                                     NS6IOMetricsSnapshot *snapshots,
                                     size_t capacity);
+
+extern NS6IOMetrics ns6_io_metrics;
 
 #endif

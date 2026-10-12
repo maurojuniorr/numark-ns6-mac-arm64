@@ -11,6 +11,7 @@
 #include <time.h>
 #include <unistd.h>
 
+
 #define DRIVER_PORT 48238
 #define BRIDGE_PORT 48239
 #define MIDI_SOCKET_BUFFER (1024 * 1024)
@@ -84,7 +85,8 @@ static bool open_socket(void){
     int reuse=1;setsockopt(socket_fd,SOL_SOCKET,SO_REUSEADDR,&reuse,sizeof(reuse));setsockopt(socket_fd,SOL_SOCKET,SO_RCVBUF,&(int){MIDI_SOCKET_BUFFER},sizeof(int));
     struct sockaddr_in local={.sin_len=sizeof(local),.sin_family=AF_INET,.sin_port=htons(BRIDGE_PORT),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
     if(bind(socket_fd,(const struct sockaddr *)&local,sizeof(local))<0){close(socket_fd);socket_fd=-1;return false;}
-    struct timeval timeout={.tv_usec=250000};setsockopt(socket_fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
+    struct timeval timeout={.tv_usec=20000};
+    if(setsockopt(socket_fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout))<0){close(socket_fd);socket_fd=-1;return false;}
     driver_address=(struct sockaddr_in){.sin_len=sizeof(driver_address),.sin_family=AF_INET,.sin_port=htons(DRIVER_PORT),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
     return true;
 }
