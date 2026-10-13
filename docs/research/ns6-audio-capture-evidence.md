@@ -131,6 +131,22 @@ The focused decompilation of `rtsGetMinAvailableFrames` (`0x17346`), `rtsProcess
 
 This adds an important architectural detail to the earlier shared-ring findings: client readiness is coordinated against a shared presentation cursor, and a lagging attached client can hold back a near-deadline USB output group. It does **not** establish that this path caused the glitches observed with our driver, nor does it justify copying the kext's client policy into our single-`WriteMix` transport. The current driver has no equivalent collection of independent per-client `AudioSM` rings; diagnosis should continue to rely on its own callback, queue, USB-completion, and underrun counters.
 
+## Ghidra pass 8: feedback-pattern reacquisition (2026-10-13)
+
+This pass follows `PGFramePatternObserver::isocFeedbackReadCompleteFullFrame` (`0x1a49c`) and `PGDevice::isocReadCompleteFeedback` (`0x13fa6`):
+
+- In full-frame mode, an in-range feedback value selects one of the precomputed eight-packet patterns. An out-of-range value clears the observer's locked flag, resets its reacquisition reference to the current history cursor, and copies the nominal predicted eight-packet pattern into that history slot. The 128-entry high-speed history advances by eight entries per full-frame value. Therefore the lock can only return after the cursor makes a complete history pass without another invalid value resetting the reference; the exact elapsed time depends on the number of values in each USB callback and on how often invalid values arrive.
+
+The observer treats a bad feedback value as loss of confidence in timing, not immediate loss of audio: it keeps packet shaping alive with a predicted pattern while it reacquires its history lock. It also shows that the feedback decoder's nonzero return is a lock-reacquisition signal in this mode, not a per-packet “feedback is valid” flag.
+
+## Ghidra pass 9: sustained feedback errors stop streaming and trigger recovery (2026-10-13)
+
+The feedback callback increments its error counter for ISO descriptors whose completion status is not success. `isocReadCompleteFeedback` clears that counter only when the observer decoder returns nonzero. Once the counter exceeds 40, the callback calls `stopStreaming(true)` and sends streaming notification code `2`; it returns without submitting the next feedback read. This escalates sustained transfer trouble instead of endlessly retrying a broken feedback request.
+
+`stopStreaming(true)` marks streaming inactive, cancels the input/output/keep-alive rings, aborts the relevant USB pipes and asynchronous port, waits 100 ms, and then runs the stopped callback. Separately, `handleStreamBroken` (`0x16924`) has a two-stage recovery path: its second stage waits 100 ms, prepares the current configuration, and—when the driver's streaming-enable field is set—reinitializes clients, calls `startStreaming`, and sends notification code `3`. The decompilation does not establish that every notification code `2` invokes this exact second stage, so the relationship should not be treated as proven without the notification dispatcher.
+
+This gives us a useful instrumentation target if we later diagnose clock/USB interruptions: count feedback descriptor errors, observer lock transitions, and stop/restart events separately. It does not justify changing our adaptive clock or queue behavior after the clean one-hour run.
+
 ## Comparison with the current CoreAudio driver
 
 The current implementation uses a different architecture, so the Ploytec worker thread and shared `AudioSM` ring should not be copied literally:
