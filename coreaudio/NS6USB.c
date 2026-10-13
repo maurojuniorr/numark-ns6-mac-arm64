@@ -10,6 +10,7 @@
 #include "NS6AudioRecovery.h"
 #include "NS6FirmwareVersion.h"
 #include "NS6IOMetrics.h"
+#include "NS6FeedbackTelemetry.h"
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOCFPlugIn.h>
 #include <IOKit/IOKitLib.h>
@@ -99,14 +100,24 @@ static atomic_uint_fast64_t feedback_samples;
 static atomic_uint_fast64_t feedback_44_frames;
 static atomic_uint_fast64_t feedback_45_frames;
 static atomic_uint_fast64_t feedback_other_values;
+static atomic_uint_fast64_t feedback_short_packets;
+static atomic_uint_fast64_t feedback_out_of_range_values;
+static atomic_uint_fast64_t feedback_lock_events;
+static atomic_uint_fast64_t feedback_stale_resets;
 static atomic_uint_fast64_t feedback_packet_errors;
 static atomic_uint_fast64_t feedback_last_log_ms;
+static atomic_uint_fast64_t feedback_short_log_ms;
+static atomic_uint_fast64_t feedback_invalid_log_ms;
+static atomic_uint_fast64_t feedback_transport_log_ms;
 static atomic_uint_fast64_t feedback_last_valid_ms;
+static atomic_uint_fast64_t feedback_stale_reset_started_ms;
 static atomic_uint_fast64_t waveform_completions;
 static atomic_uint_fast64_t waveform_errors;
 static atomic_uint_fast64_t waveform_last_log_ms;
 static unsigned char feedback_last_sample[3];
 static uint64_t feedback_logged_samples, feedback_logged_44, feedback_logged_45, feedback_logged_other;
+static uint64_t feedback_logged_short, feedback_logged_out_of_range;
+static uint64_t feedback_logged_lock_events, feedback_logged_stale_resets;
 static bool thread_created, initialized;
 static NS6ClockControl clock_control;
 static int32_t last_recovery_sample[4];
@@ -311,27 +322,59 @@ static void feedback_complete(void *reference,IOReturn status,void *argument){
     if(!atomic_load_explicit(&running,memory_order_acquire))return;
     if(status!=kIOReturnSuccess){
         uint64_t errors=atomic_fetch_add_explicit(&feedback_packet_errors,1,memory_order_relaxed)+1;
-        if(should_log_once_per_second(&feedback_last_log_ms))
-            os_log_error(OS_LOG_DEFAULT,"Numark NS6 feedback endpoint read failed: 0x%08x (%llu errors)",(unsigned)status,(unsigned long long)errors);
+        uint64_t now_ms=monotonic_ms(),age_ms=0,last_valid=atomic_load_explicit(&feedback_last_valid_ms,memory_order_acquire);
+        bool have_age=ns6_feedback_elapsed_ms(now_ms,last_valid,&age_ms);
+        if(should_log_once_per_second(&feedback_transport_log_ms))
+            os_log_error(OS_LOG_DEFAULT,"Numark NS6 feedback read failure at monotonic %llu ms: slot %u, status 0x%08x, valid-feedback age %llu ms (known %u), queue %u frames, cumulative errors %llu",(unsigned long long)now_ms,(unsigned)(slot-feedback),(unsigned)status,(unsigned long long)age_ms,have_age?1u:0u,ns6_transport_available(),(unsigned long long)errors);
         feedback_submit(slot);return;
     }
     for(unsigned p=0;p<FEEDBACK_PACKETS;++p){
         IOUSBLowLatencyIsocFrame *frame=&slot->frames[p];
-        if(frame->frStatus!=kIOReturnSuccess){atomic_fetch_add_explicit(&feedback_packet_errors,1,memory_order_relaxed);continue;}
-        if(frame->frActCount<3)continue;
+        if(frame->frStatus!=kIOReturnSuccess){
+            uint64_t errors=atomic_fetch_add_explicit(&feedback_packet_errors,1,memory_order_relaxed)+1;
+            uint64_t now_ms=monotonic_ms(),age_ms=0,last_valid=atomic_load_explicit(&feedback_last_valid_ms,memory_order_acquire);
+            bool have_age=ns6_feedback_elapsed_ms(now_ms,last_valid,&age_ms);
+            if(should_log_once_per_second(&feedback_transport_log_ms))
+                os_log_error(OS_LOG_DEFAULT,"Numark NS6 feedback frame error at monotonic %llu ms: slot %u packet %u, status 0x%08x, actual/requested %u/%u bytes, valid-feedback age %llu ms (known %u), queue %u frames, cumulative errors %llu",(unsigned long long)now_ms,(unsigned)(slot-feedback),p,(unsigned)frame->frStatus,(unsigned)frame->frActCount,(unsigned)frame->frReqCount,(unsigned long long)age_ms,have_age?1u:0u,ns6_transport_available(),(unsigned long long)errors);
+            continue;
+        }
+        if(frame->frActCount<3){
+            uint64_t total=atomic_fetch_add_explicit(&feedback_short_packets,1,memory_order_relaxed)+1;
+            uint64_t now_ms=monotonic_ms(),age_ms=0,last_valid=atomic_load_explicit(&feedback_last_valid_ms,memory_order_acquire);
+            bool have_age=ns6_feedback_elapsed_ms(now_ms,last_valid,&age_ms);
+            if(should_log_once_per_second(&feedback_short_log_ms))
+                os_log_error(OS_LOG_DEFAULT,"Numark NS6 short feedback packet at monotonic %llu ms: slot %u packet %u, actual/requested %u/%u bytes, status 0x%08x, valid-feedback age %llu ms (known %u), clock locked %u, queue %u frames, cumulative short packets %llu",(unsigned long long)now_ms,(unsigned)(slot-feedback),p,(unsigned)frame->frActCount,(unsigned)frame->frReqCount,(unsigned)frame->frStatus,(unsigned long long)age_ms,have_age?1u:0u,ns6_clock_control_is_locked(&clock_control)?1u:0u,ns6_transport_available(),(unsigned long long)total);
+            continue;
+        }
         const unsigned char *packet=slot->data+p*feedback_packet_bytes;
         feedback_last_sample[0]=packet[0];feedback_last_sample[1]=packet[1];feedback_last_sample[2]=packet[2];
         atomic_fetch_add_explicit(&feedback_samples,1,memory_order_relaxed);
-        bool valid_clock_feedback=packet[0]>=42&&packet[0]<=46;
+        bool valid_clock_feedback=ns6_clock_control_feedback_value_is_valid(packet[0]);
+        uint64_t now_ms=monotonic_ms();
+        if(!valid_clock_feedback){
+            uint64_t total=atomic_fetch_add_explicit(&feedback_out_of_range_values,1,memory_order_relaxed)+1;
+            uint64_t age_ms=0,last_valid=atomic_load_explicit(&feedback_last_valid_ms,memory_order_acquire);
+            bool have_age=ns6_feedback_elapsed_ms(now_ms,last_valid,&age_ms);
+            if(should_log_once_per_second(&feedback_invalid_log_ms))
+                os_log_error(OS_LOG_DEFAULT,"Numark NS6 out-of-range feedback at monotonic %llu ms: slot %u packet %u, value %u (bytes %02x %02x %02x), actual/requested %u/%u, valid range 42..46, valid-feedback age %llu ms (known %u), clock locked %u, queue %u frames, cumulative invalid values %llu",(unsigned long long)now_ms,(unsigned)(slot-feedback),p,(unsigned)packet[0],packet[0],packet[1],packet[2],(unsigned)frame->frActCount,(unsigned)frame->frReqCount,(unsigned long long)age_ms,have_age?1u:0u,ns6_clock_control_is_locked(&clock_control)?1u:0u,ns6_transport_available(),(unsigned long long)total);
+        }
         bool was_locked=ns6_clock_control_is_locked(&clock_control);
         if(packet[0]==44){atomic_fetch_add_explicit(&feedback_44_frames,1,memory_order_relaxed);}
         else if(packet[0]==45){atomic_fetch_add_explicit(&feedback_45_frames,1,memory_order_relaxed);}
         else atomic_fetch_add_explicit(&feedback_other_values,1,memory_order_relaxed);
         if(valid_clock_feedback)ns6_clock_control_observe(&clock_control,packet[0]);
         if(valid_clock_feedback)
-            atomic_store_explicit(&feedback_last_valid_ms,monotonic_ms(),memory_order_release);
-        if(!was_locked&&ns6_clock_control_is_locked(&clock_control))
-            os_log(OS_LOG_DEFAULT,"Numark NS6 USB feedback active: %.3f Hz diagnostic; clock mode %{public}s",(double)ns6_clock_control_rate_millihz(&clock_control)/1000.0,ns6_clock_control_is_adaptive_enabled()?"adaptive":"fixed nominal (diagnostic only)");
+            atomic_store_explicit(&feedback_last_valid_ms,now_ms,memory_order_release);
+        if(!was_locked&&ns6_clock_control_is_locked(&clock_control)){
+            atomic_fetch_add_explicit(&feedback_lock_events,1,memory_order_relaxed);
+            uint64_t stale_started=atomic_exchange_explicit(&feedback_stale_reset_started_ms,0,memory_order_acq_rel);
+            uint64_t recovery_ms=0;
+            bool recovering=ns6_feedback_elapsed_ms(now_ms,stale_started,&recovery_ms);
+            if(recovering)
+                os_log(OS_LOG_DEFAULT,"Numark NS6 feedback lock reacquired at monotonic %llu ms after %llu ms; first frame value %u; queue %u frames; rate %.3f Hz",(unsigned long long)now_ms,(unsigned long long)recovery_ms,(unsigned)packet[0],ns6_transport_available(),(double)ns6_clock_control_rate_millihz(&clock_control)/1000.0);
+            else
+                os_log(OS_LOG_DEFAULT,"Numark NS6 USB feedback active at monotonic %llu ms: first frame value %u; queue %u frames; %.3f Hz diagnostic; clock mode %{public}s",(unsigned long long)now_ms,(unsigned)packet[0],ns6_transport_available(),(double)ns6_clock_control_rate_millihz(&clock_control)/1000.0,ns6_clock_control_is_adaptive_enabled()?"adaptive":"fixed nominal (diagnostic only)");
+        }
     }
     if(should_log_once_per_second(&feedback_last_log_ms)){
         uint64_t samples=atomic_load_explicit(&feedback_samples,memory_order_relaxed);
@@ -340,10 +383,16 @@ static void feedback_complete(void *reference,IOReturn status,void *argument){
         uint64_t other=atomic_load_explicit(&feedback_other_values,memory_order_relaxed);
         uint64_t window44=count44-feedback_logged_44, window45=count45-feedback_logged_45;
         uint64_t window_other=other-feedback_logged_other, window_samples=samples-feedback_logged_samples;
+        uint64_t short_packets=atomic_load_explicit(&feedback_short_packets,memory_order_relaxed);
+        uint64_t out_of_range=atomic_load_explicit(&feedback_out_of_range_values,memory_order_relaxed);
+        uint64_t lock_events=atomic_load_explicit(&feedback_lock_events,memory_order_relaxed);
+        uint64_t stale_resets=atomic_load_explicit(&feedback_stale_resets,memory_order_relaxed);
         uint64_t valid=window44+window45;
         double average=valid?44.0+(double)window45/(double)valid:0.0;
-        os_log(OS_LOG_DEFAULT,"Numark NS6 USB clock feedback: %llu samples, 44=%llu, 45=%llu, other=%llu, mean %.4f frames/report; mode %{public}s; diagnostic feedback %.3f Hz; output rate %.3f Hz; source step %.8f; request total %llu, sent %llu, debt %lld; queue %u frames; cumulative %llu samples; last %02x %02x %02x; read errors %llu",(unsigned long long)window_samples,(unsigned long long)window44,(unsigned long long)window45,(unsigned long long)window_other,average,ns6_clock_control_is_adaptive_enabled()?(ns6_clock_control_is_locked(&clock_control)?"adaptive":"adaptive warmup"):"fixed nominal (diagnostic)",(double)ns6_clock_control_rate_millihz(&clock_control)/1000.0,(double)ns6_clock_control_output_rate_millihz(&clock_control)/1000.0,ns6_clock_control_source_frames_per_output_frame(&clock_control,ns6_transport_available()),(unsigned long long)ns6_clock_control_requested_total(&clock_control),(unsigned long long)ns6_clock_control_sent_total(&clock_control),(long long)ns6_clock_control_debt(&clock_control),ns6_transport_available(),(unsigned long long)samples,feedback_last_sample[0],feedback_last_sample[1],feedback_last_sample[2],(unsigned long long)atomic_load_explicit(&feedback_packet_errors,memory_order_relaxed));
+        os_log(OS_LOG_DEFAULT,"Numark NS6 USB clock feedback: %llu samples, 44=%llu, 45=%llu, other=%llu, mean %.4f frames/report; short packets +%llu total %llu; out-of-range +%llu total %llu; lock events +%llu total %llu; stale-feedback resets +%llu total %llu; mode %{public}s; diagnostic feedback %.3f Hz; output rate %.3f Hz; source step %.8f; request total %llu, sent %llu, debt %lld; queue %u frames; cumulative %llu samples; last %02x %02x %02x; USB read/submit/frame errors %llu",(unsigned long long)window_samples,(unsigned long long)window44,(unsigned long long)window45,(unsigned long long)window_other,average,(unsigned long long)(short_packets-feedback_logged_short),(unsigned long long)short_packets,(unsigned long long)(out_of_range-feedback_logged_out_of_range),(unsigned long long)out_of_range,(unsigned long long)(lock_events-feedback_logged_lock_events),(unsigned long long)lock_events,(unsigned long long)(stale_resets-feedback_logged_stale_resets),(unsigned long long)stale_resets,ns6_clock_control_is_adaptive_enabled()?(ns6_clock_control_is_locked(&clock_control)?"adaptive":"adaptive warmup"):"fixed nominal (diagnostic)",(double)ns6_clock_control_rate_millihz(&clock_control)/1000.0,(double)ns6_clock_control_output_rate_millihz(&clock_control)/1000.0,ns6_clock_control_source_frames_per_output_frame(&clock_control,ns6_transport_available()),(unsigned long long)ns6_clock_control_requested_total(&clock_control),(unsigned long long)ns6_clock_control_sent_total(&clock_control),(long long)ns6_clock_control_debt(&clock_control),ns6_transport_available(),(unsigned long long)samples,feedback_last_sample[0],feedback_last_sample[1],feedback_last_sample[2],(unsigned long long)atomic_load_explicit(&feedback_packet_errors,memory_order_relaxed));
         feedback_logged_samples=samples;feedback_logged_44=count44;feedback_logged_45=count45;feedback_logged_other=other;
+        feedback_logged_short=short_packets;feedback_logged_out_of_range=out_of_range;
+        feedback_logged_lock_events=lock_events;feedback_logged_stale_resets=stale_resets;
     }
     feedback_submit(slot);
 }
@@ -353,8 +402,10 @@ static void feedback_submit(struct feedback_slot *slot){
     IOReturn result=(*auxiliary_interface)->LowLatencyReadIsochPipeAsync(auxiliary_interface,feedback_pipe,slot->data,0,FEEDBACK_PACKETS,1,slot->frames,feedback_complete,slot);
     if(result!=kIOReturnSuccess){
         uint64_t errors=atomic_fetch_add_explicit(&feedback_packet_errors,1,memory_order_relaxed)+1;
-        if(should_log_once_per_second(&feedback_last_log_ms))
-            os_log_error(OS_LOG_DEFAULT,"Numark NS6 feedback endpoint submit failed: 0x%08x (%llu errors)",(unsigned)result,(unsigned long long)errors);
+        uint64_t now_ms=monotonic_ms(),age_ms=0,last_valid=atomic_load_explicit(&feedback_last_valid_ms,memory_order_acquire);
+        bool have_age=ns6_feedback_elapsed_ms(now_ms,last_valid,&age_ms);
+        if(should_log_once_per_second(&feedback_transport_log_ms))
+            os_log_error(OS_LOG_DEFAULT,"Numark NS6 feedback submit failure at monotonic %llu ms: slot %u, status 0x%08x, valid-feedback age %llu ms (known %u), queue %u frames, cumulative errors %llu",(unsigned long long)now_ms,(unsigned)(slot-feedback),(unsigned)result,(unsigned long long)age_ms,have_age?1u:0u,ns6_transport_available(),(unsigned long long)errors);
     }
 }
 static bool usb_failure(const char *operation,IOReturn result){fprintf(stderr,"Numark NS6 %s failed: 0x%08x\n",operation,result);os_log_error(OS_LOG_DEFAULT,"Numark NS6 %{public}s failed: 0x%08x",operation,(unsigned)result);return false;}
@@ -393,10 +444,15 @@ static void fill(struct slot *slot){
     unsigned millisecond_frames[8];
     for(unsigned packet=0;packet<PACKETS;++packet){
         uint64_t last_feedback=atomic_load_explicit(&feedback_last_valid_ms,memory_order_acquire);
-        if(ns6_clock_control_is_locked(&clock_control)&&last_feedback&&monotonic_ms()-last_feedback>2000){
-            ns6_clock_control_reset_feedback(&clock_control);
-            atomic_store_explicit(&feedback_last_valid_ms,0,memory_order_release);
-            os_log_error(OS_LOG_DEFAULT,"Numark NS6 USB clock feedback stale; discarding its estimate and retaining nominal 44.1 kHz cadence");
+        if(ns6_clock_control_is_locked(&clock_control)&&last_feedback){
+            uint64_t now_ms=monotonic_ms(),feedback_age_ms=0;
+            if(ns6_feedback_elapsed_ms(now_ms,last_feedback,&feedback_age_ms)&&feedback_age_ms>2000){
+                ns6_clock_control_reset_feedback(&clock_control);
+                atomic_fetch_add_explicit(&feedback_stale_resets,1,memory_order_relaxed);
+                atomic_store_explicit(&feedback_stale_reset_started_ms,now_ms,memory_order_release);
+                atomic_store_explicit(&feedback_last_valid_ms,0,memory_order_release);
+                os_log_error(OS_LOG_DEFAULT,"Numark NS6 stale feedback reset at monotonic %llu ms: last valid report age %llu ms, queue %u frames, retaining nominal 44.1 kHz cadence",(unsigned long long)now_ms,(unsigned long long)feedback_age_ms,ns6_transport_available());
+            }
         }
         if((packet % 8u) == 0)
             ns6_clock_control_next_millisecond(&clock_control, millisecond_frames);
@@ -694,7 +750,7 @@ static void *worker(void *unused){
 }
 bool ns6_usb_start(void){
     pthread_mutex_lock(&lock); if(thread_created){bool result=initialized;pthread_mutex_unlock(&lock);return result;}
-    mach_timebase_info(&usb_timebase); ns6_clock_control_init(&clock_control); ns6_usb_timing_init(&completion_interval_timing); ns6_usb_timing_init(&completion_dispatch_lag_timing); atomic_store(&last_completion_callback_ns,0); ns6_usb_timing_init(&callback_pre_fill_timing); ns6_usb_timing_init(&fill_duration_timing); ns6_usb_timing_init(&fill_cpu_timing); ns6_usb_timing_init(&callback_submit_timing); ns6_usb_timing_init(&submit_api_timing); ns6_usb_timing_init(&submit_api_cpu_timing); initialized=false; atomic_store(&completed_transfers,0); atomic_store(&underrun_frames,0); atomic_store(&underrun_events,0); atomic_store(&underrun_max_burst,0); atomic_store(&isoc_packet_errors,0); atomic_store(&isoc_short_packets,0); atomic_store(&isoc_short_bytes,0); atomic_store(&isoc_60_byte_packets,0); atomic_store(&isoc_72_byte_packets,0); atomic_store(&isoc_other_size_packets,0); atomic_store(&isoc_transfer_errors,0); atomic_store(&last_underrun_log_ms,0); atomic_store(&last_packet_log_ms,0); atomic_store(&last_packet_status,kIOReturnSuccess); atomic_store(&feedback_samples,0); atomic_store(&feedback_44_frames,0); atomic_store(&feedback_45_frames,0); atomic_store(&feedback_other_values,0); atomic_store(&feedback_packet_errors,0); atomic_store(&feedback_last_log_ms,0); atomic_store(&feedback_last_valid_ms,0); feedback_logged_samples=feedback_logged_44=feedback_logged_45=feedback_logged_other=0; memset(feedback_last_sample,0,sizeof(feedback_last_sample)); ns6_transport_reset(); atomic_store(&output_paused,true); atomic_store(&standby_prime_pending,true); atomic_store(&recovery_requested,false); atomic_store(&running,true);
+    mach_timebase_info(&usb_timebase); ns6_clock_control_init(&clock_control); ns6_usb_timing_init(&completion_interval_timing); ns6_usb_timing_init(&completion_dispatch_lag_timing); atomic_store(&last_completion_callback_ns,0); ns6_usb_timing_init(&callback_pre_fill_timing); ns6_usb_timing_init(&fill_duration_timing); ns6_usb_timing_init(&fill_cpu_timing); ns6_usb_timing_init(&callback_submit_timing); ns6_usb_timing_init(&submit_api_timing); ns6_usb_timing_init(&submit_api_cpu_timing); initialized=false; atomic_store(&completed_transfers,0); atomic_store(&underrun_frames,0); atomic_store(&underrun_events,0); atomic_store(&underrun_max_burst,0); atomic_store(&isoc_packet_errors,0); atomic_store(&isoc_short_packets,0); atomic_store(&isoc_short_bytes,0); atomic_store(&isoc_60_byte_packets,0); atomic_store(&isoc_72_byte_packets,0); atomic_store(&isoc_other_size_packets,0); atomic_store(&isoc_transfer_errors,0); atomic_store(&last_underrun_log_ms,0); atomic_store(&last_packet_log_ms,0); atomic_store(&last_packet_status,kIOReturnSuccess); atomic_store(&feedback_samples,0); atomic_store(&feedback_44_frames,0); atomic_store(&feedback_45_frames,0); atomic_store(&feedback_other_values,0); atomic_store(&feedback_short_packets,0); atomic_store(&feedback_out_of_range_values,0); atomic_store(&feedback_lock_events,0); atomic_store(&feedback_stale_resets,0); atomic_store(&feedback_packet_errors,0); atomic_store(&feedback_last_log_ms,0); atomic_store(&feedback_short_log_ms,0); atomic_store(&feedback_invalid_log_ms,0); atomic_store(&feedback_transport_log_ms,0); atomic_store(&feedback_last_valid_ms,0); atomic_store(&feedback_stale_reset_started_ms,0); feedback_logged_samples=feedback_logged_44=feedback_logged_45=feedback_logged_other=0; feedback_logged_short=feedback_logged_out_of_range=0; feedback_logged_lock_events=feedback_logged_stale_resets=0; memset(feedback_last_sample,0,sizeof(feedback_last_sample)); ns6_transport_reset(); atomic_store(&output_paused,true); atomic_store(&standby_prime_pending,true); atomic_store(&recovery_requested,false); atomic_store(&running,true);
     if(pthread_create(&thread,NULL,worker,NULL)!=0){atomic_store(&running,false);pthread_mutex_unlock(&lock);return false;}
     thread_created=true; while(!initialized&&atomic_load(&running))pthread_cond_wait(&changed,&lock); bool result=initialized; pthread_mutex_unlock(&lock);
     if(!result){pthread_join(thread,NULL);pthread_mutex_lock(&lock);thread_created=false;pthread_mutex_unlock(&lock);} return result;

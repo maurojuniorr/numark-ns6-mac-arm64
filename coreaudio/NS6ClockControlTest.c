@@ -81,6 +81,14 @@ static void test_invalid_feedback_cannot_change_rate(void) {
     assert(ns6_clock_control_rate_millihz(&control) == 44100000);
 }
 
+static void test_feedback_range_matches_hardware_packet_contract(void) {
+    assert(!ns6_clock_control_feedback_value_is_valid(41));
+    assert(ns6_clock_control_feedback_value_is_valid(42));
+    assert(ns6_clock_control_feedback_value_is_valid(44));
+    assert(ns6_clock_control_feedback_value_is_valid(46));
+    assert(!ns6_clock_control_feedback_value_is_valid(47));
+}
+
 static void test_feedback_cadence_follows_device_report_without_debt_bias(void) {
     NS6ClockControl control;
     ns6_clock_control_init(&control);
@@ -280,6 +288,7 @@ int main(void) {
     test_feedback_packet_sizes_are_distributed_within_each_millisecond();
     test_feedback_tracks_measured_hardware_rate();
     test_invalid_feedback_cannot_change_rate();
+    test_feedback_range_matches_hardware_packet_contract();
     test_feedback_cadence_follows_device_report_without_debt_bias();
     test_batched_feedback_uses_fractional_rate_instead_of_repeating_last_report();
     test_output_rate_is_bounded_to_measured_ns6_clock_band();

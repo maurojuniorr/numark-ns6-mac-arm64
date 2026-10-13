@@ -11,23 +11,24 @@ Linux project is also still in progress. This repository adapts that shared
 hardware knowledge to macOS; it is not a port of Numark's discontinued driver
 and is not an official Numark or Ploytec product.
 
-> **Current release: 0.2.123.** The adaptive-clock driver has been tested with
-> an original NS6 on an M1 Pro Mac running macOS Sequoia and has been stable in
-> the maintainer's recent sessions. Testing with other Macs, macOS releases,
-> and audio applications is still welcome.
+> **Current tested build: 0.2.127.** During a 90-minute playback session on
+> an M1 Pro Mac running macOS Sequoia, the maintainer reported no audible
+> clicks or glitches. The adaptive clock stayed within 0.175 Hz of 44.1 kHz.
+> See the [0.2.127 test record](docs/research/2026-10-13-audio-stability-0.2.127.md)
+> for diagnostic details and the isolated feedback-recovery event observed in
+> that session. Testing with other Macs, macOS releases, and audio applications
+> is still welcome.
 
-## ✨ What's new in 0.2.123
+## ✨ What's new in 0.2.127
 
-- Audio recovery no longer inserts a protective rebuffer or fade-in when the
-  queue gets low. If a USB output block is genuinely short, only its missing
-  tail is faded down from the last valid sample.
-- CoreAudio `WriteMix` diagnostics now record each client's callback frame
-  count, timing between callbacks, maximum enqueue duration, and callback
-  periods exceeded. These measurements are written to the system log to help
-  distinguish late audio callbacks from USB transfer faults.
-- The MIDI bridge LaunchAgent targets the app bundle installed by the package,
-  and the installer removes an obsolete localized app copy to avoid leaving a
-  stale bridge executable behind.
+- Feedback diagnostics now distinguish short packets, out-of-range values,
+  transport read errors, stale-feedback resets, and clock relock events. This
+  helps identify recovery behavior without changing the adaptive clock's
+  nominal 44.1 kHz fallback.
+- The 0.2.127 test run sustained playback for 90 minutes with no audible
+  artifacts reported by the maintainer. The feedback endpoint produced one
+  brief recovery episode; underrun counters then remained unchanged for the
+  rest of the observed run.
 
 ## 👨‍🔧 About the project
 

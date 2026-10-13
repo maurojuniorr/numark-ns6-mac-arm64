@@ -9,6 +9,11 @@
 #define NS6_ADAPTIVE_CLOCK_MIN_OUTPUT_RATE_MILLIHZ UINT64_C(44000000)
 #endif
 #define NS6_MAX_OUTPUT_RATE_MILLIHZ UINT64_C(44100300)
+bool ns6_clock_control_feedback_value_is_valid(uint8_t frames_per_ms) {
+    return frames_per_ms >= NS6_FEEDBACK_MIN_FRAMES_PER_MS &&
+           frames_per_ms <= NS6_FEEDBACK_MAX_FRAMES_PER_MS;
+}
+
 void ns6_clock_control_init(NS6ClockControl *control) {
     if (!control) return;
     memset(control, 0, sizeof(*control));
@@ -34,8 +39,7 @@ void ns6_clock_control_reset_feedback(NS6ClockControl *control) {
 }
 
 void ns6_clock_control_observe(NS6ClockControl *control, uint8_t frames_per_ms) {
-    if (!control || frames_per_ms < NS6_FEEDBACK_MIN_FRAMES_PER_MS ||
-        frames_per_ms > NS6_FEEDBACK_MAX_FRAMES_PER_MS) return;
+    if (!control || !ns6_clock_control_feedback_value_is_valid(frames_per_ms)) return;
 
     control->target_frames_per_ms = frames_per_ms;
     control->requested_total += frames_per_ms;

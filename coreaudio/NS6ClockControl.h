@@ -35,6 +35,7 @@ typedef struct {
 } NS6ClockControl;
 
 void ns6_clock_control_init(NS6ClockControl *control);
+bool ns6_clock_control_feedback_value_is_valid(uint8_t frames_per_ms);
 void ns6_clock_control_reset_feedback(NS6ClockControl *control);
 void ns6_clock_control_observe(NS6ClockControl *control, uint8_t frames_per_ms);
 void ns6_clock_control_next_millisecond(NS6ClockControl *control, unsigned packet_frames[8]);
