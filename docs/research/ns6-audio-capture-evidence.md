@@ -157,6 +157,14 @@ I traced references to `stcNotifyStreaming` (`0x1686c`), `onDispatchStreaming` (
 
 This confirms that the kext has a two-stage recovery protocol available to its user-space client, which is more deliberate than a USB callback restarting the stream by itself. It still does not prove that every event code `2` causes the HAL to issue both commands: that decision lives in the separate user-space HAL binary, so the kext alone cannot close that last link. A follow-up pass should inspect the corresponding HAL notification handler before treating recovery as automatic.
 
+## Ghidra pass 11: HAL automatically chains both recovery stages (2026-10-13)
+
+I inspected the original x86_64 Ploytec HAL binary in a separate read-only Ghidra project and traced `PGOSXDevice::KernelDriverNotificationHandler` (`0x35b50`). It reads the `PT_StateChange` event code at offset `+4`; event `2` takes the `STC_STREAM_BROKEN` path and logs that event. The handler then calls `DriverConnection::callDriver(..., 0x1f)`. Only when that call returns with its success bit set does it wait 100 ms and call `DriverConnection::callDriver(..., 0x20)`.
+
+Cross-referencing those selectors against the kext dispatch closes the gap left in pass 10: `0x1f` enters `PGDevice::handleStreamBroken(..., 1)`, and `0x20` enters `(..., 2)`. Stage 1 can stop/unconfigure the old stream and reports whether this caller won the recovery handoff; the HAL uses that result to gate stage 2. Stage 2 waits another 100 ms in the kext, reapplies the current configuration, reinitializes clients, restarts streaming when streaming remains enabled, and publishes streaming-state notification `3`.
+
+This is direct evidence that the vendor HAL automatically handles the kext's stream-broken notification with a gated two-stage recovery sequence. It does not show that every audible glitch follows this path, nor that our CoreAudio implementation should copy the Ploytec recovery design unchanged. The relevant artifacts are `/private/tmp/ns6-ghidra-hal/hal-recovery-pass15.txt` (HAL handler) and `/private/tmp/ns6-ghidra-pass2/recovery-xrefs-pass13.txt` (kext dispatch and stages).
+
 ## Comparison with the current CoreAudio driver
 
 The current implementation uses a different architecture, so the Ploytec worker thread and shared `AudioSM` ring should not be copied literally:
