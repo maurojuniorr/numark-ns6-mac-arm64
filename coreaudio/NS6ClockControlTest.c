@@ -41,7 +41,8 @@ static void test_feedback_tracks_measured_hardware_rate(void) {
     assert(ns6_clock_control_requested_total(&control) == expected);
     assert(ns6_clock_control_sent_total(&control) > 0);
     assert(ns6_clock_control_rate_millihz(&control) == 44100300);
-    double source_step = ns6_clock_control_source_frames_per_output_frame(&control, 4096);
+    double source_step = ns6_clock_control_source_frames_per_output_frame(
+        &control, NS6_CLOCK_QUEUE_TARGET_FRAMES);
     assert(source_step < 1.0 && source_step > 0.999);
     double high_queue_step = ns6_clock_control_source_frames_per_output_frame(&control, 16000);
     double low_queue_step = ns6_clock_control_source_frames_per_output_frame(&control, 0);
@@ -208,7 +209,7 @@ static void test_queue_stays_below_overflow_during_60s_rate_mismatch(void) {
     for (unsigned i = 0; i < NS6_FEEDBACK_WINDOW; ++i)
         ns6_clock_control_observe(&control, i % 10u == 9u ? 45 : 44);
 
-    double queue = 4096.0;
+    double queue = (double)NS6_CLOCK_QUEUE_TARGET_FRAMES;
     double producer_fraction = 0.0;
     double source_fraction = 0.0;
     double peak = queue;
@@ -235,6 +236,8 @@ static void test_queue_stays_below_overflow_during_60s_rate_mismatch(void) {
         assert(queue < 16384.0 && "CoreAudio ring overflowed in rate-mismatch simulation");
     }
     assert(peak < 8192.0 && "adaptive trim failed to recover before ring overflow");
+    printf("queue target %u: 60 s rate-mismatch peak %.0f frames\n",
+           NS6_CLOCK_QUEUE_TARGET_FRAMES, peak);
 }
 
 static void test_queue_recovers_when_hardware_output_is_44k(void) {
@@ -243,7 +246,7 @@ static void test_queue_recovers_when_hardware_output_is_44k(void) {
     for (unsigned i = 0; i < NS6_FEEDBACK_WINDOW; ++i)
         ns6_clock_control_observe(&control, i % 10u == 9u ? 45 : 44);
 
-    double queue = 4096.0;
+    double queue = (double)NS6_CLOCK_QUEUE_TARGET_FRAMES;
     double producer_fraction = 0.0;
     double source_fraction = 0.0;
     double peak = queue;
@@ -268,6 +271,8 @@ static void test_queue_recovers_when_hardware_output_is_44k(void) {
         assert(queue < 16384.0 && "44 kHz device cadence overflowed the transport ring");
     }
     assert(peak < 8192.0 && "queue trim cannot recover from the measured 44 kHz cadence");
+    printf("queue target %u: 180 s 44 kHz-cadence peak %.0f frames\n",
+           NS6_CLOCK_QUEUE_TARGET_FRAMES, peak);
 }
 
 int main(void) {

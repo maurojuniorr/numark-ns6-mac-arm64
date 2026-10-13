@@ -192,7 +192,7 @@ double ns6_clock_control_source_frames_per_output_frame(const NS6ClockControl *c
     /* Keep the SPSC queue away from both starvation and overflow. The USB
        feedback establishes the base clock ratio; queue error applies a slow,
        bounded trim to absorb residual host/device drift and startup backlog. */
-    const double target_frames = 4096.0;
+    const double target_frames = (double)NS6_CLOCK_QUEUE_TARGET_FRAMES;
     double trim = ((double)queued_frames - target_frames) * 0.000001;
     /* Allow bounded SRC correction to absorb the measured producer/device
        mismatch before the 16K-frame ring fills and CoreAudio blocks are lost. */
