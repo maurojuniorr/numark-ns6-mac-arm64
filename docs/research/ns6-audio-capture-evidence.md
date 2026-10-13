@@ -121,6 +121,16 @@ The original HAL component was present on this Mac at `/Library/Audio/Plug-Ins/H
 
 This closes the static path from a CoreAudio IOProc callback through the HAL's local buffers and shared-memory output ring to the kernel USB encoder. It also explains why a large shared ring capacity is not the application's selected buffer: the HAL uses the selected frame size as its work block, while the ring is a larger transport buffer paced by timestamps. The remaining unknowns are runtime ring occupancy and whether this exact 3.3.11 HAL was loaded during the historical USB capture; bundle presence and binary analysis alone do not prove either.
 
+## Ghidra pass 7: output readiness is gated by the slowest attached client (2026-10-13)
+
+The focused decompilation of `rtsGetMinAvailableFrames` (`0x17346`), `rtsProcessIsocOut_Std` (`0x173ba`), `ClientData__rtsIsocOutputSamples` (`0x7ef2`), and `AudioSM::read` (`0x2a090`) clarifies how the legacy driver arbitrates several audio clients before filling a USB output group:
+
+- `rtsGetMinAvailableFrames` scans eight client slots. For each slot with both its attachment and shared-memory references set, it evaluates that client's frame/timestamp position relative to the common output-frame cursor, keeps the minimum result, and counts eligible clients. The output path therefore uses the least-ready client as its readiness bound; it does not average client queue depths.
+- `rtsProcessIsocOut_Std` compares that minimum against the frame count of the next packet/group when the USB schedule is near its deadline. If the minimum is too small, it leaves the group pending for a later completion instead of consuming the client rings immediately. Outside that near-deadline condition, the same check does not defer the group. The decompiler's local names and timing units are not reliable enough to assign a wall-clock duration to this threshold.
+- When output proceeds, the kernel passes one monotonic frame cursor to `DriverData::rtsIsocOutput`; each attached client's wrapper seeds its `AudioSM::read` cursor from that same position. `AudioSM::read` wraps the cursor at ring capacity and advances it by the requested frame count, but does not itself test whether that many frames are available. Readiness protection therefore resides in the caller's client scan and deadline gate, not inside the ring read routine.
+
+This adds an important architectural detail to the earlier shared-ring findings: client readiness is coordinated against a shared presentation cursor, and a lagging attached client can hold back a near-deadline USB output group. It does **not** establish that this path caused the glitches observed with our driver, nor does it justify copying the kext's client policy into our single-`WriteMix` transport. The current driver has no equivalent collection of independent per-client `AudioSM` rings; diagnosis should continue to rely on its own callback, queue, USB-completion, and underrun counters.
+
 ## Comparison with the current CoreAudio driver
 
 The current implementation uses a different architecture, so the Ploytec worker thread and shared `AudioSM` ring should not be copied literally:
