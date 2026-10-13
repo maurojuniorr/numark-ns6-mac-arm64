@@ -173,6 +173,17 @@ Our `NS6USB.c` feedback reader currently increments `feedback_packet_errors` for
 
 The practical difference is specific: Ploytec escalates persistent trouble on the feedback input stream into a client-mediated stream rebuild, while our driver currently logs feedback errors and falls back from stale clock feedback without restarting. This makes a feedback-only recovery policy a candidate for a later controlled test, not an automatic change: the old threshold is tied to its observer's lock state and the full Ploytec HAL/kext lifecycle, so copying `>40` alone would not reproduce its semantics.
 
+## Ghidra pass 13: `STC_STREAM_BROKEN` is a generic recovery notification (2026-10-13)
+
+I decompiled the callers that publish streaming notification code `2`. The feedback-error threshold is only one source:
+
+- `rtsIsoWriteComplete` publishes code `2` when the host's current USB frame has reached/passed the scheduled OUT frame. It logs the lateness, advances the next-frame target, stops streaming, and notifies clients.
+- `rtsIsoReadComplete` publishes code `2` after its transfer-error counter exceeds `40` on the supported device paths, or when the reported channel configuration changes unexpectedly.
+- The bulk and interrupt IN/OUT completion callbacks also stop an active stream and publish code `2` for failed completions (with an aborted-transfer status exception on the input paths).
+- The feedback reader publishes the same code after its error counter exceeds `40`.
+
+Therefore, the HAL's `0x1f`/`0x20` recovery sequence is shared across several failure classes. Seeing `STC_STREAM_BROKEN` or notification `2` alone cannot identify whether the cause was feedback, a late isochronous OUT request, an IN error, a configuration change, or another endpoint. Root-cause diagnosis requires the originating kext log/callback or equivalent per-endpoint telemetry. This also means the Ploytec recovery path is not evidence that our current feedback error count should directly trigger a whole-stream restart.
+
 ## Comparison with the current CoreAudio driver
 
 The current implementation uses a different architecture, so the Ploytec worker thread and shared `AudioSM` ring should not be copied literally:
