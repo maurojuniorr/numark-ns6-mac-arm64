@@ -147,6 +147,16 @@ The feedback callback increments its error counter for ISO descriptors whose com
 
 This gives us a useful instrumentation target if we later diagnose clock/USB interruptions: count feedback descriptor errors, observer lock transitions, and stop/restart events separately. It does not justify changing our adaptive clock or queue behavior after the clean one-hour run.
 
+## Ghidra pass 10: stream recovery is a client-mediated two-stage protocol (2026-10-13)
+
+I traced references to `stcNotifyStreaming` (`0x1686c`), `onDispatchStreaming` (`0x13eae`), and `handleStreamBroken` (`0x16924`) with a read-only Ghidra headless script against the existing `NumarkNS6Audio` project:
+
+- `stcNotifyStreaming` forwards its event code to `PGKernelDeviceNUMARKNS6::messageToClients`. The feedback-failure path sends code `2` after stopping the stream.
+- The exported `ASClientNUMARKNS6::method_CallDriver` and `AudioUserClientNUMARKNS6::userDispatch` each expose command `0x1f` as `handleStreamBroken(..., 1)` and command `0x20` as `handleStreamBroken(..., 2)`. Stage 1 returns a result to the caller; stage 2 can rebuild the configuration, reinitialize clients, restart streaming, and publish code `3`.
+- `onDispatchStreaming` simply passes the client's `PT_Dispatch` through `dispatchFunction`; that dispatch also exposes explicit `resumeStreaming` and `suspendStreaming` commands. This is the client-facing control surface around the lower-level USB stream lifecycle.
+
+This confirms that the kext has a two-stage recovery protocol available to its user-space client, which is more deliberate than a USB callback restarting the stream by itself. It still does not prove that every event code `2` causes the HAL to issue both commands: that decision lives in the separate user-space HAL binary, so the kext alone cannot close that last link. A follow-up pass should inspect the corresponding HAL notification handler before treating recovery as automatic.
+
 ## Comparison with the current CoreAudio driver
 
 The current implementation uses a different architecture, so the Ploytec worker thread and shared `AudioSM` ring should not be copied literally:
