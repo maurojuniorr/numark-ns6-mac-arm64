@@ -1,0 +1,21 @@
+#!/bin/zsh
+set -eu
+
+APP_SUPPORT="/Library/Application Support/Numark NS6/rollback-previous"
+OLD_AGENT="/Library/LaunchAgents/io.github.maurojuniorr.numark-ns6-midi-bridge.plist"
+OLD_DRIVER="/Library/Audio/Plug-Ins/HAL/NumarkNS6M1.driver"
+CONSOLE_UID=$(/usr/bin/stat -f '%u' /dev/console)
+
+/bin/mkdir -p "$APP_SUPPORT"
+if [[ -d "$OLD_DRIVER" && ! -e "$APP_SUPPORT/NumarkNS6M1.driver" ]]; then
+    /usr/bin/ditto "$OLD_DRIVER" "$APP_SUPPORT/NumarkNS6M1.driver"
+fi
+if [[ -f "$OLD_AGENT" && ! -e "$APP_SUPPORT/numark-ns6-midi-bridge.plist" ]]; then
+    /bin/cp "$OLD_AGENT" "$APP_SUPPORT/numark-ns6-midi-bridge.plist"
+fi
+if [[ "$CONSOLE_UID" != "0" ]]; then
+    /bin/launchctl bootout "gui/$CONSOLE_UID" "$OLD_AGENT" >/dev/null 2>&1 || true
+fi
+/bin/rm -f "$OLD_AGENT"
+/usr/bin/killall NumarkNS6MIDIBridge >/dev/null 2>&1 || true
+exit 0

@@ -86,6 +86,60 @@ static void test_shared_capture_ring_reports_empty_and_full(void) {
     free(ring);
 }
 
+static void test_capture_ring_cross_process_and_silence_fill(void) {
+    enum { FRAMES = 100000, BLOCK = 64 };
+    NS6SharedMemory *memory = mmap(NULL, sizeof(*memory), PROT_READ | PROT_WRITE,
+                                   MAP_SHARED | MAP_ANON, -1, 0);
+    assert(memory != MAP_FAILED);
+    memset(memory, 0, sizeof(*memory));
+    ns6_shared_memory_init(memory);
+
+    pid_t producer = fork();
+    assert(producer >= 0);
+    if (producer == 0) {
+        float input[BLOCK * 2];
+        for (uint32_t first = 0; first < FRAMES; first += BLOCK) {
+            uint32_t count = FRAMES - first < BLOCK ? FRAMES - first : BLOCK;
+            for (uint32_t frame = 0; frame < count; ++frame) {
+                input[frame * 2] = (float)(first + frame);
+                input[frame * 2 + 1] = -(float)(first + frame);
+            }
+            size_t offset = 0;
+            while (offset < count) {
+                size_t accepted = ns6_capture_ring_write(&memory->capture,
+                                                         input + offset * 2, count - offset);
+                offset += accepted;
+                if (!accepted) sched_yield();
+            }
+        }
+        _exit(0);
+    }
+
+    float output[BLOCK * 2];
+    uint32_t consumed = 0;
+    while (consumed < FRAMES) {
+        uint32_t request = FRAMES - consumed < BLOCK ? FRAMES - consumed : BLOCK;
+        size_t count = ns6_capture_ring_read(&memory->capture, output, request);
+        if (!count) {
+            sched_yield();
+            continue;
+        }
+        for (size_t frame = 0; frame < count; ++frame) {
+            float expected = (float)(consumed + frame);
+            assert(output[frame * 2] == expected);
+            assert(output[frame * 2 + 1] == -expected);
+        }
+        consumed += (uint32_t)count;
+    }
+    assert(ns6_capture_ring_read(&memory->capture, output, 1) == 0);
+    assert(output[0] == 0.0f && output[1] == 0.0f);
+
+    int status = 0;
+    assert(waitpid(producer, &status, 0) == producer);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    assert(munmap(memory, sizeof(*memory)) == 0);
+}
+
 static void test_shared_ring_two_processes(void) {
     enum { FRAMES = 1000000, BLOCK = 64 };
     NS6SharedMemory *memory = mmap(NULL, sizeof(*memory), PROT_READ | PROT_WRITE,
@@ -136,6 +190,7 @@ int main(void) {
     test_shared_output_ring_preserves_order_across_wrap();
     test_shared_capture_ring_reports_empty_and_full();
     test_shared_ring_two_processes();
+    test_capture_ring_cross_process_and_silence_fill();
     puts("NS6 shared-memory ring tests passed");
     return 0;
 }

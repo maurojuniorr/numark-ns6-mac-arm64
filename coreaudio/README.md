@@ -77,22 +77,27 @@ logs the per-frame USB timestamps. `newest age` compares the last frame's
 monotonic timestamp with callback delivery; this distinguishes late callback
 delivery from a gap in frame processing.
 
-## Data path
+## Experimental persistent USB owner (0.2.173)
 
-`DoIOOperation(WriteMix)` copies PCM to `NS6Transport` without allocation or
-locking. The USB worker resamples packed 24-bit frames from that queue by a
-fractional source phase, then emits the 5/6-frame high-speed ISO packet pattern
-used by the validated native transport. Queue occupancy trims the host/device
-clock ratio to keep the bounded FIFO away from starvation and overflow. This
-separation is required because CoreAudio invokes `DoIOOperation` on a real-time
-deadline while USB completion callbacks run on a normal run loop.
+The experimental package runs one per-user LaunchAgent as the persistent NS6
+USB/MIDI owner. The HAL connects to it through Mach IPC and maps shared output
+and capture rings. `DoIOOperation(WriteMix)` and `ReadInput` access those rings
+without USB access, Mach calls, allocation, or waits. The service owns the USB
+transport, MIDI endpoints, capture decoding, and recovery. This avoids the HAL
+helper and MIDI bridge independently opening the same device.
+
+The HAL `StartIO`/`StopIO` path notifies the service outside the real-time
+callback. The service keeps the USB owner alive across client-flow changes and
+resumes the output after USB recovery when an audio client is still active.
+The LaunchAgent runs in the logged-in GUI session; behavior across logout,
+fast-user switching, and system sleep still needs hardware testing.
 
 ## Build and install
 
 Connect and power on the NS6, then run:
 
 ```sh
-cd macos/coreaudio
+cd coreaudio
 make
 make usb-test
 make install
@@ -105,28 +110,35 @@ separate from Numark's old Intel-only bundle.
 
 ## Installer package
 
-Build an adaptive macOS installer package with:
+Build the experimental persistent-owner package with:
 
 ```sh
 make package
 ```
 
-The package is written to `dist/NumarkNS6-$(VERSION).pkg`. Open it in Finder or
-install it from Terminal with:
+The package is written to
+`build-experimental/dist/NumarkNS6-0.2.173-experimental-persistent-owner.pkg`.
+It is not the published stable package and has not completed hardware
+acceptance. The installer saves the existing HAL and MIDI LaunchAgent so the
+bundled rollback command can restore them. Review the package before installing;
+installation requires administrator authorization and restarts CoreAudio.
+For installation from Terminal:
 
 ```sh
-sudo installer -pkg dist/NumarkNS6-0.2.102.pkg -target /
+sudo installer -pkg build-experimental/dist/NumarkNS6-0.2.173-experimental-persistent-owner.pkg -target /
 ```
 
-It installs the arm64 HAL bundle in `/Library/Audio/Plug-Ins/HAL` and restarts
-only `coreaudiod`. It also adds **Numark NS6 Status** to Applications. The app
-shows live USB connection state, output format, channel count, and the driver
-version. Firmware is read from the NS6 through a vendor request and displayed
-in Status (the connected unit reported `1.0.3 (K1)`). The package is locally built and unsigned for
-distribution; it does not require or include Numark's legacy Intel kext.
+The package installs the arm64 HAL bundle, **Numark NS6 Status**, and the
+per-user device-service LaunchAgent. It restarts CoreAudio and starts the
+service for the logged-in GUI user. The package is locally built and unsigned
+for distribution; it does not require or include Numark's legacy Intel kext.
 
 To remove this build:
 
 ```sh
 make uninstall
 ```
+
+This invokes the rollback script from the installed Status app and restores the
+saved HAL and MIDI bridge. The rollback copy is kept under
+`/Library/Application Support/Numark NS6/rollback-previous`.

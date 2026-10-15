@@ -2,6 +2,8 @@
 
 #include "NS6DeviceProtocol.h"
 #include "NS6DeviceOwner.h"
+#include "NS6USB.h"
+#include "NS6Transport.h"
 
 #include <mach/mach_vm.h>
 #include <mach/mach_time.h>
@@ -23,7 +25,7 @@ typedef struct {
     atomic_bool stopping;
     NS6DeviceOwner owner;
     bool running;
-    bool audio_active;
+    atomic_bool audio_active;
     uint32_t startup_buffer_frames;
     uint64_t session_id;
     NS6DeviceStateSnapshot snapshot;
@@ -31,7 +33,8 @@ typedef struct {
 
 static NS6DeviceService service = {
     .receive_port = MACH_PORT_NULL,
-    .memory_entry = MACH_PORT_NULL
+    .memory_entry = MACH_PORT_NULL,
+    .startup_buffer_frames = 256
 };
 static pthread_mutex_t state_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -89,11 +92,24 @@ static void handle_control(NS6DeviceControlRequest *request) {
     switch (request->header.msgh_id) {
         case NS6_DEVICE_MSG_SET_AUDIO_ACTIVE:
             if (request->value > 1) status = MIG_BAD_ARGUMENTS;
-            else service.audio_active = request->value != 0;
+            else {
+                atomic_store_explicit(&service.audio_active, request->value != 0, memory_order_release);
+                if (request->value != 0) {
+                    ns6_usb_set_paused(false);
+                } else {
+                    ns6_usb_set_paused(true);
+                    ns6_transport_discard();
+                }
+            }
             break;
         case NS6_DEVICE_MSG_SET_STARTUP_BUFFER:
             if (request->value == 0 || request->value > 65536) status = MIG_BAD_ARGUMENTS;
-            else service.startup_buffer_frames = request->value;
+            else {
+                bool changed = service.startup_buffer_frames != request->value;
+                service.startup_buffer_frames = request->value;
+                ns6_usb_set_startup_buffer_frames(request->value);
+                if (changed && ns6_usb_is_ready() && !ns6_usb_request_restart()) status = KERN_FAILURE;
+            }
             break;
         default:
             status = MIG_BAD_ID;
@@ -188,6 +204,7 @@ bool ns6_device_service_publish(NS6SharedMemory *memory) {
     service.snapshot.firmware_version[0] = '\0';
     pthread_mutex_unlock(&state_lock);
     atomic_init(&service.stopping, false);
+    atomic_init(&service.audio_active, false);
     if (pthread_create(&service.thread, NULL, service_thread, NULL) != 0) {
         mach_port_mod_refs(mach_task_self(), service.receive_port, MACH_PORT_RIGHT_RECEIVE, -1);
         mach_port_deallocate(mach_task_self(), service.memory_entry);
@@ -215,6 +232,10 @@ void ns6_device_service_update_device_state(bool connected, bool transport_ready
         service.snapshot.firmware_version[0] = '\0';
     }
     pthread_mutex_unlock(&state_lock);
+}
+
+bool ns6_device_service_audio_active(void) {
+    return atomic_load_explicit(&service.audio_active, memory_order_acquire);
 }
 
 void ns6_device_service_stop(void) {

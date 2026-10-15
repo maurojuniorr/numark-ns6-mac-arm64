@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #define NS6_DEVICE_SERVICE_NAME "io.github.maurojuniorr.numark-ns6-device-service"
-#define NS6_DEVICE_PROTOCOL_VERSION 1u
+#define NS6_DEVICE_PROTOCOL_VERSION 2u
 
 enum {
     NS6_DEVICE_MSG_HELLO = 0x4e530001,

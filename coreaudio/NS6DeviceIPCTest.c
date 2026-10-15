@@ -1,4 +1,5 @@
 #include "NS6DeviceClient.h"
+#include "NS6USB.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -7,6 +8,14 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <servers/bootstrap.h>
+
+static bool fake_usb_ready;
+static bool fake_usb_paused;
+static uint32_t fake_startup_buffer_frames;
+bool ns6_usb_is_ready(void) { return fake_usb_ready; }
+bool ns6_usb_request_restart(void) { return fake_usb_ready; }
+void ns6_usb_set_paused(bool paused) { fake_usb_paused = paused; }
+void ns6_usb_set_startup_buffer_frames(uint32_t frames) { fake_startup_buffer_frames = frames; }
 
 typedef struct {
     mach_port_t port;
@@ -112,6 +121,27 @@ static void test_client_disconnect_invalidates_mapping(void) {
     assert(client.session_id == 0);
 }
 
+static void test_hal_client_restart_reuses_service_owner(void) {
+    FakeService persistent_service;
+    fake_service_start(&persistent_service, 0xabc123u);
+
+    NS6DeviceClient first_hal = {0};
+    first_hal.service_port = MACH_PORT_NULL;
+    assert(ns6_device_client_connect_to_port(&first_hal, persistent_service.port));
+    uint64_t owner_session = first_hal.session_id;
+    assert(owner_session == 0xabc123u);
+    atomic_store(&first_hal.shared_memory->output.high_water, 77);
+    ns6_device_client_disconnect(&first_hal); /* CoreAudio helper restart */
+
+    NS6DeviceClient replacement_hal = {0};
+    replacement_hal.service_port = MACH_PORT_NULL;
+    assert(ns6_device_client_connect_to_port(&replacement_hal, persistent_service.port));
+    assert(replacement_hal.session_id == owner_session);
+    assert(atomic_load(&replacement_hal.shared_memory->output.high_water) == 77);
+    ns6_device_client_disconnect(&replacement_hal);
+    fake_service_stop(&persistent_service);
+}
+
 static void test_service_restart_reconnects_without_shared_stale_state(void) {
     FakeService first_service;
     fake_service_start(&first_service, 1234);
@@ -137,6 +167,7 @@ int main(void) {
     test_protocol_rejects_version_mismatch();
     test_client_disconnect_invalidates_mapping();
     test_service_restart_reconnects_without_shared_stale_state();
+    test_hal_client_restart_reuses_service_owner();
     puts("NS6 device Mach IPC tests passed");
     return 0;
 }

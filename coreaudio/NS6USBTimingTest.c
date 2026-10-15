@@ -6,6 +6,8 @@
 int main(void) {
     assert(!ns6_usb_timing_is_callback_gap(19999999ULL));
     assert(ns6_usb_timing_is_callback_gap(20000000ULL));
+    assert(!ns6_usb_timing_is_slow_submit(4999999ULL));
+    assert(ns6_usb_timing_is_slow_submit(5000000ULL));
 
     NS6USBTiming timing;
     NS6USBTimingSnapshot snapshot;

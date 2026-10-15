@@ -8,9 +8,15 @@
 #include "NS6USBEndpoint.h"
 #include "NS6USBConfig.h"
 #include "NS6AudioRecovery.h"
+#include "NS6AudioPrefill.h"
 #include "NS6FirmwareVersion.h"
 #include "NS6IOMetrics.h"
 #include "NS6FeedbackTelemetry.h"
+#include "NS6FeedbackReadGate.h"
+#include "NS6IdlePCM.h"
+#include "NS6CaptureDecoder.h"
+#include "NS6CaptureRing.h"
+#include "NS6BulkINIdlePolicy.h"
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOCFPlugIn.h>
 #include <IOKit/IOKitLib.h>
@@ -29,6 +35,12 @@
 #define RATE 44100
 #define FRAME_BYTES 12
 #define NS6_STARTUP_MIN_PREFILL_FRAMES 1024u
+#ifndef NS6_USB_LOG_EXCLUSIVE_OWNER
+#define NS6_USB_LOG_EXCLUSIVE_OWNER 0
+#endif
+#ifndef NS6_IDLE_PCM_KEEPALIVE
+#define NS6_IDLE_PCM_KEEPALIVE 0
+#endif
 #define PACKETS 32
 #define FEEDBACK_PACKETS 32
 #define FEEDBACK_MAX_PACKET 64
@@ -47,7 +59,7 @@ struct slot {
     uint64_t last_submit_ns, last_submit_cpu_ns;
 };
 struct feedback_slot { IOUSBLowLatencyIsocFrame *frames; unsigned char *data; };
-struct waveform_slot { unsigned char data[WAVEFORM_READ_BYTES]; };
+struct waveform_slot { unsigned char data[WAVEFORM_READ_BYTES]; atomic_bool in_flight; };
 static IOUSBInterfaceInterface **interface;
 static IOUSBInterfaceInterface **auxiliary_interface;
 static CFRunLoopSourceRef source;
@@ -55,7 +67,13 @@ static CFRunLoopSourceRef feedback_source;
 static CFRunLoopRef run_loop;
 static struct slot slots[SLOT_COUNT];
 static struct feedback_slot feedback[FEEDBACK_SLOT_COUNT];
+static atomic_bool feedback_in_flight[FEEDBACK_SLOT_COUNT];
 static struct waveform_slot waveform[WAVEFORM_READ_SLOTS];
+static NS6CaptureRing local_capture_ring;
+static NS6CaptureRing *capture_ring=&local_capture_ring;
+static bool shared_capture_ring;
+static atomic_bool *shared_capture_requested;
+static atomic_uint_fast64_t *shared_capture_last_demand_ns;
 static UInt8 feedback_pipe;
 static UInt16 feedback_packet_bytes;
 static UInt8 waveform_pipe;
@@ -68,6 +86,10 @@ static atomic_bool buffer_restart_requested;
 static atomic_bool output_paused=true;
 static atomic_bool awaiting_audio_prefill;
 static atomic_bool waveform_drain_running;
+static atomic_bool capture_active;
+static atomic_uint_fast64_t capture_last_demand_ns;
+static atomic_uint_fast64_t capture_frames_decoded;
+static atomic_uint_fast64_t capture_ring_drops;
 static atomic_uint startup_buffer_frames=256;
 static atomic_uint firmware_response_bits;
 static atomic_bool firmware_response_valid;
@@ -75,8 +97,9 @@ static atomic_bool standby_prime_pending;
 static atomic_uint_fast64_t completed_transfers;
 static NS6USBTiming completion_interval_timing;
 static NS6USBTiming completion_dispatch_lag_timing;
+static NS6USBTiming feedback_completion_interval_timing;
+static NS6USBTiming feedback_completion_dispatch_lag_timing;
 static mach_timebase_info_data_t usb_timebase;
-static atomic_uint_fast64_t last_completion_callback_ns;
 static NS6USBTiming callback_pre_fill_timing;
 static NS6USBTiming fill_duration_timing;
 static NS6USBTiming fill_cpu_timing;
@@ -175,6 +198,38 @@ static IOUSBInterfaceInterface **open_interface_once(UInt8 wanted_number) {
     }
     IOObjectRelease(iterator); return NULL;
 }
+static void log_ns6_interface_owner(UInt8 wanted_number,IOReturn result){
+#if NS6_USB_LOG_EXCLUSIVE_OWNER
+    io_iterator_t iterator=IO_OBJECT_NULL;io_service_t service;bool found=false;
+    if(IOServiceGetMatchingServices(kIOMainPortDefault,IOServiceMatching("IOUSBHostInterface"),&iterator)!=kIOReturnSuccess)return;
+    while((service=IOIteratorNext(iterator))){
+        UInt8 number=255;
+        if(!is_ns6_interface(service)){
+            IOObjectRelease(service);continue;
+        }
+        IOCFPlugInInterface **plugin=NULL;IOUSBInterfaceInterface **candidate=NULL;SInt32 score=0;
+        HRESULT query=IOCreatePlugInInterfaceForService(service,kIOUSBInterfaceUserClientTypeID,kIOCFPlugInInterfaceID,&plugin,&score);
+        if(query==kIOReturnSuccess&&plugin){query=(*plugin)->QueryInterface(plugin,CFUUIDGetUUIDBytes(kIOUSBInterfaceInterfaceID),(LPVOID)&candidate);IODestroyPlugInInterface(plugin);}
+        if(query==kIOReturnSuccess&&candidate)(*candidate)->GetInterfaceNumber(candidate,&number);
+        if(number==wanted_number){
+            found=true;char owner_text[256]="unavailable";io_name_t class_name="unknown";
+            CFTypeRef owner=IORegistryEntryCreateCFProperty(service,CFSTR("UsbExclusiveOwner"),kCFAllocatorDefault,0);
+            if(owner&&CFGetTypeID(owner)==CFStringGetTypeID())CFStringGetCString((CFStringRef)owner,owner_text,sizeof(owner_text),kCFStringEncodingUTF8);
+            (void)IOObjectGetClass(service,class_name);
+            os_log_error(OS_LOG_DEFAULT,"Numark NS6 USB interface exclusive-open diagnostic: interface %u, result 0x%08x, current owner %{public}s, service class %{public}s",wanted_number,(unsigned)result,owner_text,class_name);
+            if(owner)CFRelease(owner);
+            if(candidate)(*candidate)->Release(candidate);
+            IOObjectRelease(service);break;
+        }
+        if(candidate)(*candidate)->Release(candidate);
+        IOObjectRelease(service);
+    }
+    IOObjectRelease(iterator);
+    if(!found)os_log_error(OS_LOG_DEFAULT,"Numark NS6 USB interface exclusive-open diagnostic: interface %u, result 0x%08x, owner unavailable (interface not found in IORegistry)",wanted_number,(unsigned)result);
+#else
+    (void)wanted_number;(void)result;
+#endif
+}
 static bool configure_ns6_device_if_needed(void){
     io_iterator_t iterator=IO_OBJECT_NULL; io_service_t service;
     if(IOServiceGetMatchingServices(kIOMainPortDefault,IOServiceMatching("IOUSBHostDevice"),&iterator)!=KERN_SUCCESS)return false;
@@ -258,7 +313,7 @@ static bool prepare_waveform_drain(void){
         IOReturn clear=(*auxiliary_interface)->ClearPipeStallBothEnds(auxiliary_interface,pipe);
         if(clear!=kIOReturnSuccess)
             os_log_error(OS_LOG_DEFAULT,"Numark NS6 waveform endpoint initial clear-halt failed: 0x%08x; continuing with asynchronous reads",(unsigned)clear);
-        os_log(OS_LOG_DEFAULT,"Numark NS6 waveform drain endpoint 0x86 found on interface 1 pipe %u (max packet %u; %u queued reads x %u bytes)",pipe,maximum,WAVEFORM_READ_SLOTS,WAVEFORM_READ_BYTES);
+        os_log(OS_LOG_DEFAULT,"Numark NS6 bulk-IN endpoint 0x86 found on interface 1 pipe %u (max packet %u; %u queued reads x %u bytes; capture decoder ready)",pipe,maximum,WAVEFORM_READ_SLOTS,WAVEFORM_READ_BYTES);
         return true;
     }
     waveform_pipe=0;
@@ -268,37 +323,54 @@ static bool prepare_waveform_drain(void){
 static void waveform_read_complete(void *reference,IOReturn status,void *argument);
 static IOReturn submit_waveform_read(struct waveform_slot *slot){
     if(!slot||!auxiliary_interface||!waveform_pipe||!atomic_load_explicit(&waveform_drain_running,memory_order_acquire))return kIOReturnNotReady;
+    bool expected=false;
+    if(!atomic_compare_exchange_strong_explicit(&slot->in_flight,&expected,true,memory_order_acq_rel,memory_order_acquire))return kIOReturnBusy;
     IOReturn result=(*auxiliary_interface)->ReadPipeAsync(auxiliary_interface,waveform_pipe,slot->data,sizeof(slot->data),waveform_read_complete,slot);
     if(result==kIOUSBPipeStalled&&atomic_load_explicit(&waveform_drain_running,memory_order_acquire)){
         IOReturn clear=(*auxiliary_interface)->ClearPipeStallBothEnds(auxiliary_interface,waveform_pipe);
         if(clear==kIOReturnSuccess)
             result=(*auxiliary_interface)->ReadPipeAsync(auxiliary_interface,waveform_pipe,slot->data,sizeof(slot->data),waveform_read_complete,slot);
     }
+    if(result!=kIOReturnSuccess)atomic_store_explicit(&slot->in_flight,false,memory_order_release);
     return result;
 }
 static void waveform_read_complete(void *reference,IOReturn status,void *argument){
-    (void)argument;
     struct waveform_slot *slot=reference;
+    if(slot)atomic_store_explicit(&slot->in_flight,false,memory_order_release);
     if(!atomic_load_explicit(&waveform_drain_running,memory_order_acquire))return;
     if(status==kIOReturnSuccess){
         uint64_t completed=atomic_fetch_add_explicit(&waveform_completions,1,memory_order_relaxed)+1;
+        uint64_t now=monotonic_ns();
+        uint64_t last_demand=shared_capture_last_demand_ns?atomic_load_explicit(shared_capture_last_demand_ns,memory_order_acquire):atomic_load_explicit(&capture_last_demand_ns,memory_order_acquire);
+        bool requested=shared_capture_requested?atomic_load_explicit(shared_capture_requested,memory_order_acquire):atomic_load_explicit(&capture_active,memory_order_acquire);
+        if(requested&&last_demand&&now-last_demand<250000000ull){
+            UInt32 bytes=(UInt32)(uintptr_t)argument;
+            float decoded[(WAVEFORM_READ_BYTES/NS6_CAPTURE_SOURCE_STRIDE)*NS6_CAPTURE_CHANNELS];
+            size_t frames=ns6_capture_decode_block(slot->data,bytes,decoded,WAVEFORM_READ_BYTES/NS6_CAPTURE_SOURCE_STRIDE);
+            size_t accepted=ns6_capture_ring_write(capture_ring,decoded,frames);
+            atomic_fetch_add_explicit(&capture_frames_decoded,frames,memory_order_relaxed);
+            if(accepted<frames)atomic_fetch_add_explicit(&capture_ring_drops,frames-accepted,memory_order_relaxed);
+        }else if(last_demand&&now-last_demand>=250000000ull){
+            atomic_store_explicit(&capture_active,false,memory_order_release);
+            if(shared_capture_requested)atomic_store_explicit(shared_capture_requested,false,memory_order_release);
+        }
         if(completed%10000==0)
-            os_log(OS_LOG_DEFAULT,"Numark NS6 waveform endpoint drain active: %llu reads, %llu read errors",(unsigned long long)completed,(unsigned long long)atomic_load_explicit(&waveform_errors,memory_order_relaxed));
+            os_log(OS_LOG_DEFAULT,"Numark NS6 bulk-IN endpoint active: %llu reads, %llu errors, %llu capture frames decoded, %llu frames dropped",(unsigned long long)completed,(unsigned long long)atomic_load_explicit(&waveform_errors,memory_order_relaxed),(unsigned long long)atomic_load_explicit(&capture_frames_decoded,memory_order_relaxed),(unsigned long long)atomic_load_explicit(&capture_ring_drops,memory_order_relaxed));
     }else{
         uint64_t errors=atomic_fetch_add_explicit(&waveform_errors,1,memory_order_relaxed)+1;
         if(should_log_once_per_second(&waveform_last_log_ms))
-            os_log_error(OS_LOG_DEFAULT,"Numark NS6 waveform endpoint read failed: 0x%08x (%llu errors)",(unsigned)status,(unsigned long long)errors);
+            os_log_error(OS_LOG_DEFAULT,"Numark NS6 bulk-IN endpoint read failed: 0x%08x (%llu errors)",(unsigned)status,(unsigned long long)errors);
         if(status==kIOUSBPipeStalled&&atomic_load_explicit(&waveform_drain_running,memory_order_acquire)){
             IOReturn clear=(*auxiliary_interface)->ClearPipeStallBothEnds(auxiliary_interface,waveform_pipe);
             if(clear!=kIOReturnSuccess&&should_log_once_per_second(&waveform_last_log_ms))
-                os_log_error(OS_LOG_DEFAULT,"Numark NS6 waveform endpoint stall recovery failed: 0x%08x",(unsigned)clear);
+                os_log_error(OS_LOG_DEFAULT,"Numark NS6 bulk-IN endpoint stall recovery failed: 0x%08x",(unsigned)clear);
         }
     }
     IOReturn result=submit_waveform_read(slot);
     if(result!=kIOReturnSuccess){
         uint64_t errors=atomic_fetch_add_explicit(&waveform_errors,1,memory_order_relaxed)+1;
         if(should_log_once_per_second(&waveform_last_log_ms))
-            os_log_error(OS_LOG_DEFAULT,"Numark NS6 waveform endpoint read resubmit failed: 0x%08x (%llu errors)",(unsigned)result,(unsigned long long)errors);
+            os_log_error(OS_LOG_DEFAULT,"Numark NS6 bulk-IN endpoint read resubmit failed: 0x%08x (%llu errors)",(unsigned)result,(unsigned long long)errors);
     }
 }
 static void start_waveform_drain(void){
@@ -315,10 +387,25 @@ static void start_waveform_drain(void){
     }
     os_log(OS_LOG_DEFAULT,"Numark NS6 waveform drain started: %u/%u asynchronous reads queued",queued,WAVEFORM_READ_SLOTS);
 }
+static void stop_waveform_drain(void){
+    if(!atomic_exchange_explicit(&waveform_drain_running,false,memory_order_acq_rel))return;
+    if(auxiliary_interface&&waveform_pipe)(*auxiliary_interface)->AbortPipe(auxiliary_interface,waveform_pipe);
+    os_log(OS_LOG_DEFAULT,"Numark NS6 bulk-IN reads paused after capture demand ended");
+}
 static void feedback_submit(struct feedback_slot *slot);
 static void feedback_complete(void *reference,IOReturn status,void *argument){
     (void)argument;
     struct feedback_slot *slot=reference;
+    uint64_t callback_ticks=mach_absolute_time();
+    uint64_t callback_ns=monotonic_ns();
+    ns6_usb_timing_record(&feedback_completion_interval_timing,callback_ns);
+    NS6USBFrameTimestampRange timestamp_range=ns6_usb_frame_timestamp_range(slot->frames,FEEDBACK_PACKETS);
+    uint64_t dispatch_lag_ticks=0;
+    if(usb_timebase.denom&&ns6_usb_frame_timestamp_callback_lag_ticks(timestamp_range,callback_ticks,&dispatch_lag_ticks))
+        ns6_usb_timing_record_duration(&feedback_completion_dispatch_lag_timing,mach_ticks_to_ns(dispatch_lag_ticks));
+    unsigned slot_index=(unsigned)(slot-feedback);
+    if(slot_index<FEEDBACK_SLOT_COUNT)
+        atomic_store_explicit(&feedback_in_flight[slot_index],false,memory_order_release);
     if(!atomic_load_explicit(&running,memory_order_acquire))return;
     if(status!=kIOReturnSuccess){
         uint64_t errors=atomic_fetch_add_explicit(&feedback_packet_errors,1,memory_order_relaxed)+1;
@@ -397,10 +484,22 @@ static void feedback_complete(void *reference,IOReturn status,void *argument){
     feedback_submit(slot);
 }
 static void feedback_submit(struct feedback_slot *slot){
-    if(!slot||!feedback_pipe||!slot->data||!slot->frames||!atomic_load_explicit(&running,memory_order_acquire))return;
+    if(!slot||!feedback_pipe||!slot->data||!slot->frames)return;
+    unsigned slot_index=(unsigned)(slot-feedback);
+    if(slot_index>=FEEDBACK_SLOT_COUNT)return;
+    bool running_now=atomic_load_explicit(&running,memory_order_acquire);
+    bool in_flight=atomic_load_explicit(&feedback_in_flight[slot_index],memory_order_acquire);
+    if(!ns6_feedback_read_should_submit(running_now,in_flight))return;
+    bool expected=false;
+    if(!atomic_compare_exchange_strong_explicit(&feedback_in_flight[slot_index],&expected,true,memory_order_acq_rel,memory_order_acquire))return;
+    if(!atomic_load_explicit(&running,memory_order_acquire)){
+        atomic_store_explicit(&feedback_in_flight[slot_index],false,memory_order_release);
+        return;
+    }
     for(unsigned p=0;p<FEEDBACK_PACKETS;++p){slot->frames[p].frReqCount=feedback_packet_bytes;slot->frames[p].frActCount=0;slot->frames[p].frStatus=0;}
     IOReturn result=(*auxiliary_interface)->LowLatencyReadIsochPipeAsync(auxiliary_interface,feedback_pipe,slot->data,0,FEEDBACK_PACKETS,1,slot->frames,feedback_complete,slot);
     if(result!=kIOReturnSuccess){
+        atomic_store_explicit(&feedback_in_flight[slot_index],false,memory_order_release);
         uint64_t errors=atomic_fetch_add_explicit(&feedback_packet_errors,1,memory_order_relaxed)+1;
         uint64_t now_ms=monotonic_ms(),age_ms=0,last_valid=atomic_load_explicit(&feedback_last_valid_ms,memory_order_acquire);
         bool have_age=ns6_feedback_elapsed_ms(now_ms,last_valid,&age_ms);
@@ -461,22 +560,26 @@ static void fill(struct slot *slot){
         if(atomic_load_explicit(&output_paused,memory_order_acquire)){
             ns6_transport_discard();
             have_last_recovery_sample=false;
-            memset(output,0,frames*FRAME_BYTES);
             /* Some NS6 units keep the USB indicator in its searching state
                until the first non-zero audio sample arrives. Prime one USB
                service interval at the smallest 24-bit PCM value; this is
                far below the DAC's analog noise floor and is not an audible
                tone. */
-            if(frames&&atomic_exchange_explicit(&standby_prime_pending,false,memory_order_acq_rel))
-                for(unsigned frame=0;frame<frames;++frame)
-                    for(unsigned channel=0;channel<4;++channel)
-                        output[frame*FRAME_BYTES+channel*3]=1;
+            bool keep_alive=false;
+#if NS6_IDLE_PCM_KEEPALIVE
+            keep_alive=true;
+#else
+            keep_alive=frames&&atomic_exchange_explicit(&standby_prime_pending,false,memory_order_acq_rel);
+#endif
+            ns6_fill_idle_pcm(output,frames,keep_alive);
             output+=frames*FRAME_BYTES;
             continue;
         }
         if(atomic_load_explicit(&awaiting_audio_prefill,memory_order_acquire)){
-            UInt32 startup_frames=atomic_load_explicit(&startup_buffer_frames,memory_order_acquire);
-            if(startup_frames<NS6_STARTUP_MIN_PREFILL_FRAMES)startup_frames=NS6_STARTUP_MIN_PREFILL_FRAMES;
+            UInt32 startup_frames=ns6_audio_startup_prefill_frames(
+                atomic_load_explicit(&startup_buffer_frames,memory_order_acquire),
+                NS6_STARTUP_MIN_PREFILL_FRAMES,
+                NS6_CLOCK_QUEUE_TARGET_FRAMES);
             if(ns6_transport_available()<startup_frames){
                 have_last_recovery_sample=false;
                 memset(output,0,frames*FRAME_BYTES);
@@ -533,8 +636,6 @@ static void complete(void *reference,IOReturn status,void *argument){
     if(!atomic_load_explicit(&running,memory_order_acquire)||atomic_load_explicit(&recovery_requested,memory_order_acquire))return;
     uint64_t callback_ticks=mach_absolute_time();
     slot->callback_ns=monotonic_ns();
-    uint64_t previous_callback_ns=atomic_exchange_explicit(&last_completion_callback_ns,slot->callback_ns,memory_order_relaxed);
-    uint64_t callback_gap_ns=previous_callback_ns&&slot->callback_ns>previous_callback_ns?slot->callback_ns-previous_callback_ns:0;
     ns6_usb_timing_record(&completion_interval_timing,slot->callback_ns);
     if(status!=kIOReturnSuccess){
         atomic_fetch_add_explicit(&isoc_transfer_errors,1,memory_order_relaxed);
@@ -571,19 +672,6 @@ static void complete(void *reference,IOReturn status,void *argument){
     uint64_t dispatch_lag_ticks=0;
     if(usb_timebase.denom&&ns6_usb_frame_timestamp_callback_lag_ticks(timestamp_range,callback_ticks,&dispatch_lag_ticks))
         ns6_usb_timing_record_duration(&completion_dispatch_lag_timing,mach_ticks_to_ns(dispatch_lag_ticks));
-    if(ns6_usb_timing_is_callback_gap(callback_gap_ns)){
-        uint64_t last_feedback=atomic_load_explicit(&feedback_last_valid_ms,memory_order_acquire);
-        uint64_t now_ms=monotonic_ms();
-        uint64_t feedback_age_ms=last_feedback&&now_ms>=last_feedback?now_ms-last_feedback:0;
-        uint64_t newest_age_us=0,span_us=0;
-        if(timestamp_range.valid_frames&&usb_timebase.denom){
-            uint64_t span_ticks=timestamp_range.newest_ticks-timestamp_range.oldest_ticks;
-            newest_age_us=mach_ticks_to_ns(dispatch_lag_ticks)/1000;
-            span_us=mach_ticks_to_ns(span_ticks)/1000;
-        }
-        os_log(OS_LOG_DEFAULT,"Numark NS6 USB callback gap: %llu us; slot %u; transfer 0x%08x; bad frames %u (last 0x%08x); short frames %u; queue %u frames; paused %u; feedback age %llu ms, samples %llu, errors %llu; timestamps %u/%u span %llu us newest age %llu us; previous submit wall/cpu %llu/%llu us; prefill %llu us; fill wall/cpu %llu/%llu us",
-            (unsigned long long)(callback_gap_ns/1000),(unsigned)(slot-slots),(unsigned)status,packet_errors,(unsigned)packet_error_status,short_packets,ns6_transport_available(),atomic_load_explicit(&output_paused,memory_order_acquire)?1u:0u,(unsigned long long)feedback_age_ms,(unsigned long long)atomic_load_explicit(&feedback_samples,memory_order_relaxed),(unsigned long long)atomic_load_explicit(&feedback_packet_errors,memory_order_relaxed),(unsigned)timestamp_range.valid_frames,(unsigned)PACKETS,(unsigned long long)span_us,(unsigned long long)newest_age_us,(unsigned long long)(slot->last_submit_ns/1000),(unsigned long long)(slot->last_submit_cpu_ns/1000),(unsigned long long)(slot->last_prefill_ns/1000),(unsigned long long)(slot->last_fill_ns/1000),(unsigned long long)(slot->last_fill_cpu_ns/1000));
-    }
     if(packet_errors){
         atomic_fetch_add_explicit(&isoc_packet_errors,packet_errors,memory_order_relaxed);
         atomic_store_explicit(&last_packet_status,packet_error_status,memory_order_relaxed);
@@ -612,6 +700,11 @@ static void complete(void *reference,IOReturn status,void *argument){
             os_log(OS_LOG_DEFAULT,"Numark NS6 USB cadence: %llu intervals, mean %.1f us, min %llu us, max %llu us",(unsigned long long)cadence.intervals,(double)cadence.total_ns/(double)cadence.intervals/1000.0,(unsigned long long)(cadence.min_ns/1000),(unsigned long long)(cadence.max_ns/1000));
         if(ns6_usb_timing_take_snapshot(&completion_dispatch_lag_timing,&dispatch_lag))
             os_log(OS_LOG_DEFAULT,"Numark NS6 USB frame-to-callback dispatch lag: %llu samples, mean %.1f us, min %llu us, max %llu us",(unsigned long long)dispatch_lag.intervals,(double)dispatch_lag.total_ns/(double)dispatch_lag.intervals/1000.0,(unsigned long long)(dispatch_lag.min_ns/1000),(unsigned long long)(dispatch_lag.max_ns/1000));
+        NS6USBTimingSnapshot feedback_cadence={0},feedback_dispatch_lag={0};
+        if(ns6_usb_timing_take_snapshot(&feedback_completion_interval_timing,&feedback_cadence))
+            os_log(OS_LOG_DEFAULT,"Numark NS6 USB feedback callback cadence: %llu intervals, mean %.1f us, min %llu us, max %llu us, paused %u",(unsigned long long)feedback_cadence.intervals,(double)feedback_cadence.total_ns/(double)feedback_cadence.intervals/1000.0,(unsigned long long)(feedback_cadence.min_ns/1000),(unsigned long long)(feedback_cadence.max_ns/1000),atomic_load_explicit(&output_paused,memory_order_acquire)?1u:0u);
+        if(ns6_usb_timing_take_snapshot(&feedback_completion_dispatch_lag_timing,&feedback_dispatch_lag))
+            os_log(OS_LOG_DEFAULT,"Numark NS6 USB feedback frame-to-callback dispatch lag: %llu samples, mean %.1f us, min %llu us, max %llu us, paused %u",(unsigned long long)feedback_dispatch_lag.intervals,(double)feedback_dispatch_lag.total_ns/(double)feedback_dispatch_lag.intervals/1000.0,(unsigned long long)(feedback_dispatch_lag.min_ns/1000),(unsigned long long)(feedback_dispatch_lag.max_ns/1000),atomic_load_explicit(&output_paused,memory_order_acquire)?1u:0u);
         if(ns6_usb_timing_take_snapshot(&callback_pre_fill_timing,&pre_fill))
             os_log(OS_LOG_DEFAULT,"Numark NS6 USB callback before fill: %llu intervals, mean %.1f us, min %llu us, max %llu us",(unsigned long long)pre_fill.intervals,(double)pre_fill.total_ns/(double)pre_fill.intervals/1000.0,(unsigned long long)(pre_fill.min_ns/1000),(unsigned long long)(pre_fill.max_ns/1000));
         if(ns6_usb_timing_take_snapshot(&fill_duration_timing,&fill_work))
@@ -655,17 +748,15 @@ static void submit(struct slot *slot){
 }
 static bool initialize(void){
     unsigned char capability[64]={0},rate[3]={0x44,0xac,0}; interface=open_interface(); if(!interface){os_log_error(OS_LOG_DEFAULT,"Numark NS6 could not find USB interface 0");return false;}
-    IOReturn result=(*interface)->USBInterfaceOpenSeize(interface); if(result!=kIOReturnSuccess)return usb_failure("open interface",result);
+    IOReturn result=(*interface)->USBInterfaceOpenSeize(interface); if(result!=kIOReturnSuccess){log_ns6_interface_owner(0,result);return usb_failure("open interface",result);}
     auxiliary_interface=open_interface_once(1); if(!auxiliary_interface){os_log_error(OS_LOG_DEFAULT,"Numark NS6 could not find USB interface 1");return false;}
-    result=(*auxiliary_interface)->USBInterfaceOpenSeize(auxiliary_interface); if(result!=kIOReturnSuccess)return usb_failure("open auxiliary interface",result);
+    result=(*auxiliary_interface)->USBInterfaceOpenSeize(auxiliary_interface); if(result!=kIOReturnSuccess){log_ns6_interface_owner(1,result);return usb_failure("open auxiliary interface",result);}
     result=(*auxiliary_interface)->SetAlternateInterface(auxiliary_interface,1); if(result!=kIOReturnSuccess)return usb_failure("select auxiliary alternate setting",result);
     (void)prepare_waveform_drain();
     result=(*interface)->CreateInterfaceAsyncEventSource(interface,&source); if(result!=kIOReturnSuccess||!source)return usb_failure("create async source",result);
     run_loop=CFRunLoopGetCurrent(); CFRetain(run_loop); CFRunLoopAddSource(run_loop,source,kCFRunLoopDefaultMode);
-    if(ns6_usb_feedback_reader_enabled()){
-        result=(*auxiliary_interface)->CreateInterfaceAsyncEventSource(auxiliary_interface,&feedback_source); if(result!=kIOReturnSuccess||!feedback_source)return usb_failure("create feedback async source",result);
-        CFRunLoopAddSource(run_loop,feedback_source,kCFRunLoopDefaultMode);
-    }
+    result=(*auxiliary_interface)->CreateInterfaceAsyncEventSource(auxiliary_interface,&feedback_source); if(result!=kIOReturnSuccess||!feedback_source)return usb_failure("create auxiliary async source",result);
+    CFRunLoopAddSource(run_loop,feedback_source,kCFRunLoopDefaultMode);
     result=(*interface)->SetAlternateInterface(interface,1); if(result!=kIOReturnSuccess)return usb_failure("select alternate setting",result);
     result=control(0xc0,86,0,0,capability,8); if(result!=kIOReturnSuccess)return usb_failure("read capability",result);
     UInt16 capability_length=capability[0]<sizeof(capability)?capability[0]:(UInt16)sizeof(capability);
@@ -673,7 +764,11 @@ static bool initialize(void){
     read_firmware_version();
     result=control(0x22,1,0x0100,134,rate,sizeof(rate));if(result!=kIOReturnSuccess)return usb_failure("set clock selector 134",result);
     result=control(0x22,1,0x0100,2,rate,sizeof(rate));if(result!=kIOReturnSuccess)return usb_failure("set clock selector 2",result);
-    result=control(0x40,73,0x0032,0,NULL,0);if(result!=kIOReturnSuccess)return usb_failure("start audio engine",result);
+    UInt8 input_mode=0;
+    result=control(0xc0,73,0,0,&input_mode,sizeof(input_mode));if(result!=kIOReturnSuccess)return usb_failure("read audio input mode",result);
+    UInt16 selected_input_mode=(UInt16)((input_mode&~0x20u)|0x30u);
+    result=control(0x40,73,selected_input_mode,0,NULL,0);if(result!=kIOReturnSuccess)return usb_failure("set audio input mode",result);
+    os_log(OS_LOG_DEFAULT,"Numark NS6 audio input mode: device 0x%02x -> host-selected two-channel mode 0x%02x",input_mode,selected_input_mode);
     prepare_feedback_reader();
     for(unsigned i=0;i<SLOT_COUNT;++i){
         result=(*interface)->LowLatencyCreateBuffer(interface,(void**)&slots[i].data,PACKETS*MAX_PACKET,kUSBLowLatencyWriteBuffer);if(result!=kIOReturnSuccess)return usb_failure("create audio buffer",result);
@@ -685,6 +780,7 @@ static void cleanup(void){
     if(atomic_exchange_explicit(&buffer_restart_requested,false,memory_order_acq_rel))ns6_midi_stop_for_audio_restart();else ns6_midi_stop();
     atomic_store_explicit(&waveform_drain_running,false,memory_order_release);
     if(interface)(*interface)->AbortPipe(interface,1);if(auxiliary_interface&&feedback_pipe)(*auxiliary_interface)->AbortPipe(auxiliary_interface,feedback_pipe);if(auxiliary_interface&&waveform_pipe)(*auxiliary_interface)->AbortPipe(auxiliary_interface,waveform_pipe); if(run_loop)CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.2,false);
+    for(unsigned i=0;i<FEEDBACK_SLOT_COUNT;++i)atomic_store_explicit(&feedback_in_flight[i],false,memory_order_release);
     if(auxiliary_interface)for(unsigned i=0;i<FEEDBACK_SLOT_COUNT;++i){if(feedback[i].data)(*auxiliary_interface)->LowLatencyDestroyBuffer(auxiliary_interface,feedback[i].data);if(feedback[i].frames)(*auxiliary_interface)->LowLatencyDestroyBuffer(auxiliary_interface,feedback[i].frames);} memset(feedback,0,sizeof(feedback));feedback_pipe=0;feedback_packet_bytes=0;
     waveform_pipe=0;
     if(interface)for(unsigned i=0;i<SLOT_COUNT;++i){if(slots[i].data)(*interface)->LowLatencyDestroyBuffer(interface,slots[i].data);if(slots[i].frames)(*interface)->LowLatencyDestroyBuffer(interface,slots[i].frames);} memset(slots,0,sizeof(slots));
@@ -726,10 +822,14 @@ static void *worker(void *unused){
         bool midi_session_active=ns6_midi_start(interface,run_loop);
         if(midi_session_active){
             (void)ns6_midi_handshake(run_loop);
+#if NS6_KEEP_WAVEFORM_DRAIN_IDLE
+            os_log(OS_LOG_DEFAULT,"Numark NS6 diagnostic: keeping endpoint 0x86 bulk-IN reads active while idle");
+#else
             if(ns6_usb_midi_input_enabled())
                 os_log(OS_LOG_DEFAULT,"Numark NS6 waveform endpoint drain disabled during active MIDI session");
             else
                 os_log(OS_LOG_DEFAULT,"Numark NS6 diagnostic audio-only run completed outbound activation; input polling and waveform drain disabled");
+#endif
         }else{
             fprintf(stderr,"Numark NS6 MIDI unavailable; continuing with audio only\n");
             if(ns6_should_run_waveform_drain(midi_session_active)){
@@ -737,7 +837,32 @@ static void *worker(void *unused){
                 start_waveform_drain();
             }
         }
-        while(atomic_load_explicit(&running,memory_order_acquire)&&!atomic_load_explicit(&recovery_requested,memory_order_acquire))CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.1,false);
+        bool feedback_reads_active=false;
+        while(atomic_load_explicit(&running,memory_order_acquire)&&!atomic_load_explicit(&recovery_requested,memory_order_acquire)){
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.1,false);
+            uint64_t capture_demand=shared_capture_last_demand_ns?atomic_load_explicit(shared_capture_last_demand_ns,memory_order_acquire):atomic_load_explicit(&capture_last_demand_ns,memory_order_acquire);
+            bool capture_active_now=shared_capture_requested?atomic_load_explicit(shared_capture_requested,memory_order_acquire):atomic_load_explicit(&capture_active,memory_order_acquire);
+            bool capture_requested=capture_active_now&&capture_demand&&monotonic_ns()-capture_demand<250000000ull;
+            bool should_run_bulk_in=ns6_bulk_in_reads_should_run(midi_session_active,capture_requested);
+            bool bulk_in_running=atomic_load_explicit(&waveform_drain_running,memory_order_acquire);
+            if(capture_requested&&!bulk_in_running){
+                os_log(OS_LOG_DEFAULT,"Numark NS6 CoreAudio requested capture; starting endpoint 0x86 bulk reads while MIDI session is active");
+                start_waveform_drain();
+            }else if(!should_run_bulk_in&&bulk_in_running){
+                stop_waveform_drain();
+            }else if(should_run_bulk_in&&!bulk_in_running){
+                if(midi_session_active&&!capture_requested)
+                    os_log(OS_LOG_DEFAULT,"Numark NS6 diagnostic: starting persistent endpoint 0x86 reads with no capture client");
+                start_waveform_drain();
+            }
+            bool should_read_feedback=atomic_load_explicit(&running,memory_order_acquire);
+            if(should_read_feedback!=feedback_reads_active){
+                feedback_reads_active=should_read_feedback;
+                os_log(OS_LOG_DEFAULT,"Numark NS6 clock feedback reads %{public}s while USB transport is active",feedback_reads_active?"active":"inactive");
+            }
+            if(should_read_feedback)
+                for(unsigned i=0;i<FEEDBACK_SLOT_COUNT;++i)feedback_submit(&feedback[i]);
+        }
         pthread_mutex_lock(&lock); initialized=false; pthread_cond_broadcast(&changed); pthread_mutex_unlock(&lock);
         cleanup();
         if(atomic_load_explicit(&running,memory_order_acquire)){
@@ -750,7 +875,8 @@ static void *worker(void *unused){
 }
 bool ns6_usb_start(void){
     pthread_mutex_lock(&lock); if(thread_created){bool result=initialized;pthread_mutex_unlock(&lock);return result;}
-    mach_timebase_info(&usb_timebase); ns6_clock_control_init(&clock_control); ns6_usb_timing_init(&completion_interval_timing); ns6_usb_timing_init(&completion_dispatch_lag_timing); atomic_store(&last_completion_callback_ns,0); ns6_usb_timing_init(&callback_pre_fill_timing); ns6_usb_timing_init(&fill_duration_timing); ns6_usb_timing_init(&fill_cpu_timing); ns6_usb_timing_init(&callback_submit_timing); ns6_usb_timing_init(&submit_api_timing); ns6_usb_timing_init(&submit_api_cpu_timing); initialized=false; atomic_store(&completed_transfers,0); atomic_store(&underrun_frames,0); atomic_store(&underrun_events,0); atomic_store(&underrun_max_burst,0); atomic_store(&isoc_packet_errors,0); atomic_store(&isoc_short_packets,0); atomic_store(&isoc_short_bytes,0); atomic_store(&isoc_60_byte_packets,0); atomic_store(&isoc_72_byte_packets,0); atomic_store(&isoc_other_size_packets,0); atomic_store(&isoc_transfer_errors,0); atomic_store(&last_underrun_log_ms,0); atomic_store(&last_packet_log_ms,0); atomic_store(&last_packet_status,kIOReturnSuccess); atomic_store(&feedback_samples,0); atomic_store(&feedback_44_frames,0); atomic_store(&feedback_45_frames,0); atomic_store(&feedback_other_values,0); atomic_store(&feedback_short_packets,0); atomic_store(&feedback_out_of_range_values,0); atomic_store(&feedback_lock_events,0); atomic_store(&feedback_stale_resets,0); atomic_store(&feedback_packet_errors,0); atomic_store(&feedback_last_log_ms,0); atomic_store(&feedback_short_log_ms,0); atomic_store(&feedback_invalid_log_ms,0); atomic_store(&feedback_transport_log_ms,0); atomic_store(&feedback_last_valid_ms,0); atomic_store(&feedback_stale_reset_started_ms,0); feedback_logged_samples=feedback_logged_44=feedback_logged_45=feedback_logged_other=0; feedback_logged_short=feedback_logged_out_of_range=0; feedback_logged_lock_events=feedback_logged_stale_resets=0; memset(feedback_last_sample,0,sizeof(feedback_last_sample)); ns6_transport_reset(); atomic_store(&output_paused,true); atomic_store(&standby_prime_pending,true); atomic_store(&recovery_requested,false); atomic_store(&running,true);
+    if(!shared_capture_ring)ns6_capture_ring_init(capture_ring);atomic_store_explicit(&capture_active,false,memory_order_release);atomic_store_explicit(&capture_last_demand_ns,0,memory_order_release);atomic_store_explicit(&capture_frames_decoded,0,memory_order_relaxed);atomic_store_explicit(&capture_ring_drops,0,memory_order_relaxed);atomic_store_explicit(&waveform_drain_running,false,memory_order_release);
+    mach_timebase_info(&usb_timebase); ns6_clock_control_init(&clock_control); ns6_usb_timing_init(&completion_interval_timing); ns6_usb_timing_init(&completion_dispatch_lag_timing); ns6_usb_timing_init(&feedback_completion_interval_timing); ns6_usb_timing_init(&feedback_completion_dispatch_lag_timing); ns6_usb_timing_init(&callback_pre_fill_timing); ns6_usb_timing_init(&fill_duration_timing); ns6_usb_timing_init(&fill_cpu_timing); ns6_usb_timing_init(&callback_submit_timing); ns6_usb_timing_init(&submit_api_timing); ns6_usb_timing_init(&submit_api_cpu_timing); initialized=false; atomic_store(&completed_transfers,0); atomic_store(&underrun_frames,0); atomic_store(&underrun_events,0); atomic_store(&underrun_max_burst,0); atomic_store(&isoc_packet_errors,0); atomic_store(&isoc_short_packets,0); atomic_store(&isoc_short_bytes,0); atomic_store(&isoc_60_byte_packets,0); atomic_store(&isoc_72_byte_packets,0); atomic_store(&isoc_other_size_packets,0); atomic_store(&isoc_transfer_errors,0); atomic_store(&last_underrun_log_ms,0); atomic_store(&last_packet_log_ms,0); atomic_store(&last_packet_status,kIOReturnSuccess); atomic_store(&feedback_samples,0); atomic_store(&feedback_44_frames,0); atomic_store(&feedback_45_frames,0); atomic_store(&feedback_other_values,0); atomic_store(&feedback_short_packets,0); atomic_store(&feedback_out_of_range_values,0); atomic_store(&feedback_lock_events,0); atomic_store(&feedback_stale_resets,0); atomic_store(&feedback_packet_errors,0); atomic_store(&feedback_last_log_ms,0); atomic_store(&feedback_short_log_ms,0); atomic_store(&feedback_invalid_log_ms,0); atomic_store(&feedback_transport_log_ms,0); atomic_store(&feedback_last_valid_ms,0); atomic_store(&feedback_stale_reset_started_ms,0); for(unsigned i=0;i<FEEDBACK_SLOT_COUNT;++i)atomic_store(&feedback_in_flight[i],false); feedback_logged_samples=feedback_logged_44=feedback_logged_45=feedback_logged_other=0; feedback_logged_short=feedback_logged_out_of_range=0; feedback_logged_lock_events=feedback_logged_stale_resets=0; memset(feedback_last_sample,0,sizeof(feedback_last_sample)); ns6_transport_reset(); atomic_store(&output_paused,true); atomic_store(&standby_prime_pending,true); atomic_store(&recovery_requested,false); atomic_store(&running,true);
     if(pthread_create(&thread,NULL,worker,NULL)!=0){atomic_store(&running,false);pthread_mutex_unlock(&lock);return false;}
     thread_created=true; while(!initialized&&atomic_load(&running))pthread_cond_wait(&changed,&lock); bool result=initialized; pthread_mutex_unlock(&lock);
     if(!result){pthread_join(thread,NULL);pthread_mutex_lock(&lock);thread_created=false;pthread_mutex_unlock(&lock);} return result;
@@ -773,5 +899,41 @@ void ns6_usb_stop(void){
     pthread_join(thread,NULL); pthread_mutex_lock(&lock); thread_created=false; initialized=false; pthread_mutex_unlock(&lock);
 }
 void ns6_usb_set_paused(bool paused){if(!paused&&atomic_load_explicit(&recovery_requested,memory_order_acquire))return;if(!paused&&atomic_load_explicit(&output_paused,memory_order_acquire))atomic_store_explicit(&awaiting_audio_prefill,true,memory_order_release);if(paused)atomic_store_explicit(&awaiting_audio_prefill,false,memory_order_release);atomic_store_explicit(&output_paused,paused,memory_order_release);}
+void ns6_usb_log_io_transition(const char *event,uint32_t client,unsigned clients_before,unsigned clients_after){
+    os_log(OS_LOG_DEFAULT,"Numark NS6 I/O boundary %{public}s: client %u, clients %u->%u, USB running %{public}s, output paused %{public}s, queue %u frames, OUT transfers %llu, underruns %llu events/%llu frames, USB errors %llu, packet errors %llu, short packets %llu/%llu bytes, OUT sizes since health 60/72/other %llu/%llu/%llu, feedback samples %llu, feedback errors %llu, endpoint 0x86 drain %{public}s",
+        event?event:"unknown",client,clients_before,clients_after,
+        atomic_load_explicit(&running,memory_order_acquire)?"yes":"no",
+        atomic_load_explicit(&output_paused,memory_order_acquire)?"yes":"no",
+        ns6_transport_available(),
+        (unsigned long long)atomic_load_explicit(&completed_transfers,memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&underrun_events,memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&underrun_frames,memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&isoc_transfer_errors,memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&isoc_packet_errors,memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&isoc_short_packets,memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&isoc_short_bytes,memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&isoc_60_byte_packets,memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&isoc_72_byte_packets,memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&isoc_other_size_packets,memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&feedback_samples,memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&feedback_packet_errors,memory_order_relaxed),
+        atomic_load_explicit(&waveform_drain_running,memory_order_acquire)?"active":"stopped");
+}
+size_t ns6_usb_capture_read(float *output,size_t frames){
+    if(!output||frames==0)return 0;
+    atomic_store_explicit(&capture_last_demand_ns,monotonic_ns(),memory_order_release);
+    if(!atomic_exchange_explicit(&capture_active,true,memory_order_acq_rel))ns6_capture_ring_clear(capture_ring);
+    return ns6_capture_ring_read(capture_ring,output,frames);
+}
+void ns6_usb_bind_shared_capture(NS6CaptureRing *ring,atomic_bool *requested,
+                                atomic_uint_fast64_t *last_demand_ns){
+    if(ring&&requested&&last_demand_ns){
+        capture_ring=ring;shared_capture_ring=true;
+        shared_capture_requested=requested;shared_capture_last_demand_ns=last_demand_ns;
+    }else{
+        capture_ring=&local_capture_ring;shared_capture_ring=false;
+        shared_capture_requested=NULL;shared_capture_last_demand_ns=NULL;
+    }
+}
 void ns6_usb_set_startup_buffer_frames(uint32_t frames){atomic_store_explicit(&startup_buffer_frames,frames,memory_order_release);}
 void ns6_usb_submit_pcm(const uint8_t *pcm24,uint32_t frames){(void)pcm24;(void)frames;}

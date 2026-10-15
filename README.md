@@ -64,13 +64,12 @@ hardware testing, that latency matched Mixxx's report.
 
 ## 🏗️ How the driver is put together
 
-The Core Audio HAL driver owns the NS6 USB session and sends playback over its
-isochronous audio endpoint. Audio is queued outside Core Audio's real-time
-callback, converted to the packed format used by the controller, and sent in
-whole-frame USB packets. MIDI is carried over the same USB session and
-forwarded to a companion process, which publishes the CoreMIDI ports in the
-logged-in user session. This lets audio and MIDI share the device without two
-processes competing to open it.
+The experimental 0.2.173 build moves USB ownership into a persistent,
+per-user LaunchAgent. The Core Audio HAL plug-in and MIDI bridge communicate
+with that owner through Mach IPC and shared-memory audio rings. The real-time
+HAL callback only copies PCM to or from those rings; USB and MIDI operations
+stay in the service, so replacing or restarting the HAL helper does not create
+a second process that claims the NS6 interfaces.
 
 The USB audio schedule uses whole five- and six-frame packets, with endpoint
 `0x81` feedback selecting the frame pattern for each millisecond. Adaptive
@@ -82,12 +81,14 @@ packet/transfer errors, and recovery events.
 
 ## ⚠️ Current limitations
 
-- **Audio capture is not implemented** as a macOS input device. The Ploytec
-  kext contains generic input-stream code, but the available Mojave USB trace
-  shows no separate PCM input endpoint: `0x81` carries short feedback data,
-  `0x86` carries structured bulk data used by the waveform path, and the other
-  endpoints are playback/MIDI. A Windows capture with known audio on the
-  physical inputs is still needed to reconcile “Inputs: 2” with the USB traffic.
+- **Persistent USB ownership is experimental.** The 0.2.173 package has passed
+  local unit, IPC, HAL-boundary, packaging, and arm64 build checks, but has not
+  yet completed hardware acceptance. The published stable release remains the
+  safer choice until the experimental package is installed and exercised.
+- **Audio capture through the persistent service is not hardware-validated.**
+  The service now routes the capture stream through shared memory, but
+  simultaneous input, output, MIDI, disconnect/reconnect, and helper-restart
+  behavior still need testing on the NS6.
 - **Hardware coverage is limited.** The current release has been stable in
   recent sessions on the maintainer's M1 Pro/Sequoia setup; testing on other
   systems and longer sessions is still needed to characterize rare failures.
@@ -103,7 +104,7 @@ packet/transfer errors, and recovery events.
 
 ## 📥 Install
 
-Download the latest **NumarkNS6 `.pkg`** from
+Download the latest stable **NumarkNS6 `.pkg`** from
 [GitHub Releases](https://github.com/maurojuniorr/numark-ns6-mac-arm64/releases).
 Open the package and follow Installer. It installs the Core Audio driver,
 **Numark NS6 Status**, and the CoreMIDI bridge. Administrator authorization is
@@ -133,13 +134,16 @@ make clock-control-fixed-test
 make usb-work-interval-regression-test
 ```
 
-To create a local installer package:
+To build the experimental persistent-owner package locally:
 
 ```sh
-make package
+make experimental-package
 ```
 
-The package is written to `coreaudio/dist/`. For USB descriptor diagnostics,
+The 0.2.173 package is written to
+`coreaudio/build-experimental/dist/` and is deliberately separate from the
+published stable release. Do not treat it as a stable release until hardware
+acceptance is complete. For USB descriptor diagnostics,
 build and run the read-only probe separately:
 
 ```sh
