@@ -96,6 +96,11 @@ transport-ring-test: NS6TransportRingTest.c NS6Transport.c NS6Transport.h
 	$(CC) $(CFLAGS) NS6TransportRingTest.c NS6Transport.c -o build/ns6-transport-ring-test -framework CoreAudio -lm
 	build/ns6-transport-ring-test
 
+shared-memory-test: NS6SharedMemoryTest.c NS6SharedMemory.h NS6Transport.c NS6Transport.h NS6CaptureRing.h
+	mkdir -p build
+	$(CC) $(CFLAGS) NS6SharedMemoryTest.c NS6Transport.c -o build/ns6-shared-memory-test -framework CoreAudio -lm
+	build/ns6-shared-memory-test
+
 clock-control-test: NS6ClockControlTest.c NS6ClockControl.c NS6ClockControl.h
 	$(CC) -Wall -Wextra -Werror -DNS6_ADAPTIVE_CLOCK_ENABLED=1 NS6ClockControlTest.c NS6ClockControl.c -o build/ns6-clock-control-test
 	build/ns6-clock-control-test
