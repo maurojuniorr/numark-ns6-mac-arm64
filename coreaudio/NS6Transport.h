@@ -18,6 +18,8 @@ typedef struct {
 } NS6TransportReader;
 
 void ns6_transport_init_shared(NS6TransportShared *shared);
+/* Bind before starting the USB worker; NULL restores the process-local default ring. */
+void ns6_transport_bind_shared(NS6TransportShared *shared, NS6TransportReader *reader);
 void ns6_transport_reset_shared(NS6TransportShared *shared);
 void ns6_transport_discard_shared(NS6TransportShared *shared, NS6TransportReader *reader);
 bool ns6_transport_enqueue_shared(NS6TransportShared *shared, const void *frames, UInt32 count,

@@ -10,6 +10,7 @@ DRIVER_OPT_FLAGS ?= -O2
 CFLAGS := -Wall -Wextra -Werror -arch arm64 -isysroot $(SDK) -mmacosx-version-min=15.0 -fPIC -DNS6_ADAPTIVE_CLOCK_ENABLED=$(ADAPTIVE_CLOCK) -DNS6_FEEDBACK_PATTERN_SCHEDULER_ENABLED=$(NS6_FEEDBACK_PATTERN_SCHEDULER) -DNS6_ADAPTIVE_CLOCK_MIN_OUTPUT_RATE_MILLIHZ=$(NS6_ADAPTIVE_CLOCK_MIN_OUTPUT_RATE_MILLIHZ) -DNS6_MIDI_ENABLED=$(NS6_MIDI_ENABLED) -DNS6_FEEDBACK_READER_ENABLED=$(NS6_FEEDBACK_READER_ENABLED) -DNS6_USB_OUTPUT_SLOT_COUNT=$(NS6_USB_OUTPUT_SLOT_COUNT) -DNS6_CLOCK_QUEUE_TARGET_FRAMES=$(NS6_CLOCK_QUEUE_TARGET_FRAMES)
 BUILD := build/NumarkNS6.driver/Contents
 APP := build/NumarkNS6Status.app
+EXPERIMENTAL_SERVICE := build-experimental/NumarkNS6DeviceService
 VERSION ?= 0.2.127
 BUNDLE_BUILD_VERSION ?= $(shell echo $(VERSION) | awk -F. '{print $$3}')
 PACKAGE_ID := io.github.maurojuniorr.numark-ns6
@@ -105,6 +106,17 @@ device-ipc-test: NS6DeviceIPCTest.c NS6DeviceClient.c NS6DeviceMachService.c NS6
 	mkdir -p build
 	$(CC) -std=c11 -Wall -Wextra -Werror NS6DeviceIPCTest.c NS6DeviceClient.c NS6DeviceMachService.c NS6Transport.c -o build/ns6-device-ipc-test -framework CoreAudio -lm -pthread
 	build/ns6-device-ipc-test
+
+device-owner-test: NS6DeviceOwnerTest.c NS6DeviceOwner.h NS6SharedMemory.h NS6Transport.c NS6Transport.h NS6CaptureRing.h
+	mkdir -p build
+	$(CC) -std=c11 -Wall -Wextra -Werror NS6DeviceOwnerTest.c NS6Transport.c -o build/ns6-device-owner-test -framework CoreAudio -lm
+	build/ns6-device-owner-test
+
+device-service: $(EXPERIMENTAL_SERVICE)
+
+$(EXPERIMENTAL_SERVICE): FORCE NS6MIDIBridge.c NS6DeviceMachService.c NS6DeviceOwner.h NS6SharedMemory.h NS6Transport.c NS6USB.c NS6USB.h NS6USBEndpoint.h NS6USBConfig.h NS6USBTiming.c NS6USBTiming.h NS6ClockControl.c NS6ClockControl.h NS6FeedbackTelemetry.h NS6MIDI.c NS6MIDI.h NS6IOMetrics.c NS6IOMetrics.h NS6AudioRecovery.c NS6AudioRecovery.h NS6FirmwareVersion.c NS6FirmwareVersion.h
+	mkdir -p build-experimental
+	$(CC) $(CFLAGS) -DNS6_DEVICE_SERVICE_BUILD=1 $(DRIVER_OPT_FLAGS) NS6MIDIBridge.c NS6DeviceMachService.c NS6Transport.c NS6USB.c NS6USBTiming.c NS6ClockControl.c NS6MIDI.c NS6IOMetrics.c NS6AudioRecovery.c NS6FirmwareVersion.c -o $@ -framework CoreAudio -framework CoreFoundation -framework CoreMIDI -framework IOKit -lm -pthread
 
 clock-control-test: NS6ClockControlTest.c NS6ClockControl.c NS6ClockControl.h
 	$(CC) -Wall -Wextra -Werror -DNS6_ADAPTIVE_CLOCK_ENABLED=1 NS6ClockControlTest.c NS6ClockControl.c -o build/ns6-clock-control-test

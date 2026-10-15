@@ -1,13 +1,16 @@
 #include "NS6DeviceMachService.h"
 
 #include "NS6DeviceProtocol.h"
+#include "NS6DeviceOwner.h"
 
 #include <mach/mach_vm.h>
 #include <mach/mach_time.h>
+#include <os/log.h>
 #include <pthread.h>
 #include <servers/bootstrap.h>
 #include <stdatomic.h>
 #include <string.h>
+#include <unistd.h>
 
 typedef struct {
     NS6SharedMemory *memory;
@@ -18,6 +21,7 @@ typedef struct {
     mach_vm_size_t memory_offset;
     pthread_t thread;
     atomic_bool stopping;
+    NS6DeviceOwner owner;
     bool running;
     bool audio_active;
     uint32_t startup_buffer_frames;
@@ -27,9 +31,9 @@ typedef struct {
 
 static NS6DeviceService service = {
     .receive_port = MACH_PORT_NULL,
-    .memory_entry = MACH_PORT_NULL,
-    .stopping = ATOMIC_VAR_INIT(false)
+    .memory_entry = MACH_PORT_NULL
 };
+static pthread_mutex_t state_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static kern_return_t send_reply(mach_msg_header_t *reply, mach_msg_size_t size) {
     return mach_msg(reply, MACH_SEND_MSG, size, 0, MACH_PORT_NULL,
@@ -109,8 +113,9 @@ static void handle_state(mach_msg_header_t *request) {
     reply.header.msgh_remote_port = request->msgh_remote_port;
     reply.header.msgh_id = NS6_DEVICE_MSG_STATE_REPLY;
     reply.status = KERN_SUCCESS;
+    pthread_mutex_lock(&state_lock);
     reply.snapshot = service.snapshot;
-    reply.snapshot.connected = service.snapshot.connected;
+    pthread_mutex_unlock(&state_lock);
     reply.snapshot.active_frames = service.startup_buffer_frames;
     (void)send_reply(&reply.header, sizeof(reply));
 }
@@ -148,6 +153,8 @@ bool ns6_device_service_publish(NS6SharedMemory *memory) {
     if (!memory || service.running ||
         memory->protocol_version != NS6_SHARED_MEMORY_PROTOCOL_VERSION ||
         memory->struct_size != sizeof(*memory)) return false;
+    ns6_device_owner_init(&service.owner);
+    if (!ns6_device_owner_claim(&service.owner)) return false;
 
     mach_vm_address_t address = (mach_vm_address_t)(uintptr_t)memory;
     mach_vm_address_t page_base = address & ~((mach_vm_address_t)vm_page_size - 1u);
@@ -158,12 +165,16 @@ bool ns6_device_service_publish(NS6SharedMemory *memory) {
     kern_return_t result = mach_make_memory_entry_64(mach_task_self(), &entry_size,
                                                      page_base, VM_PROT_READ | VM_PROT_WRITE,
                                                      &service.memory_entry, MACH_PORT_NULL);
-    if (result != KERN_SUCCESS || entry_size < length) return false;
+    if (result != KERN_SUCCESS || entry_size < length) {
+        ns6_device_owner_release(&service.owner);
+        return false;
+    }
 
     result = bootstrap_check_in(bootstrap_port, NS6_DEVICE_SERVICE_NAME, &service.receive_port);
     if (result != KERN_SUCCESS) {
         mach_port_deallocate(mach_task_self(), service.memory_entry);
         service.memory_entry = MACH_PORT_NULL;
+        ns6_device_owner_release(&service.owner);
         return false;
     }
     service.memory = memory;
@@ -171,19 +182,39 @@ bool ns6_device_service_publish(NS6SharedMemory *memory) {
     service.mapping_size = length;
     service.memory_offset = offset;
     service.session_id = mach_absolute_time() ^ (uint64_t)(uintptr_t)memory;
+    pthread_mutex_lock(&state_lock);
     service.snapshot.connected = 0;
     service.snapshot.transport_ready = 0;
-    atomic_store_explicit(&service.stopping, false, memory_order_release);
+    service.snapshot.firmware_version[0] = '\0';
+    pthread_mutex_unlock(&state_lock);
+    atomic_init(&service.stopping, false);
     if (pthread_create(&service.thread, NULL, service_thread, NULL) != 0) {
         mach_port_mod_refs(mach_task_self(), service.receive_port, MACH_PORT_RIGHT_RECEIVE, -1);
         mach_port_deallocate(mach_task_self(), service.memory_entry);
         service.receive_port = MACH_PORT_NULL;
         service.memory_entry = MACH_PORT_NULL;
         service.memory = NULL;
+        ns6_device_owner_release(&service.owner);
         return false;
     }
     service.running = true;
+    os_log(OS_LOG_DEFAULT, "Numark NS6 persistent USB service claimed by PID %d, protocol %u, session %llu",
+           getpid(), NS6_DEVICE_PROTOCOL_VERSION, (unsigned long long)service.session_id);
     return true;
+}
+
+void ns6_device_service_update_device_state(bool connected, bool transport_ready,
+                                           const char *firmware_version) {
+    pthread_mutex_lock(&state_lock);
+    service.snapshot.connected = connected ? 1u : 0u;
+    service.snapshot.transport_ready = transport_ready ? 1u : 0u;
+    if (firmware_version) {
+        strlcpy(service.snapshot.firmware_version, firmware_version,
+                sizeof(service.snapshot.firmware_version));
+    } else {
+        service.snapshot.firmware_version[0] = '\0';
+    }
+    pthread_mutex_unlock(&state_lock);
 }
 
 void ns6_device_service_stop(void) {
@@ -199,4 +230,6 @@ void ns6_device_service_stop(void) {
     service.mapping_size = 0;
     service.memory_offset = 0;
     service.running = false;
+    ns6_device_owner_release(&service.owner);
+    os_log(OS_LOG_DEFAULT, "Numark NS6 persistent USB service released by PID %d", getpid());
 }

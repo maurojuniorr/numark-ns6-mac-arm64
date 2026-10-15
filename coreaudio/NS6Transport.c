@@ -10,6 +10,8 @@
 /* Compatibility state for the existing in-process HAL/USB path. */
 static NS6TransportShared default_shared;
 static NS6TransportReader default_reader;
+static NS6TransportShared *active_shared = &default_shared;
+static NS6TransportReader *active_reader = &default_reader;
 
 static void pack24(unsigned char *out, int32_t sample) {
     out[0] = (unsigned char)sample;
@@ -61,6 +63,16 @@ void ns6_transport_init_shared(NS6TransportShared *shared) {
     atomic_init(&shared->read_cursor, 0);
     atomic_init(&shared->high_water, 0);
     atomic_init(&shared->initialized, false);
+}
+
+void ns6_transport_bind_shared(NS6TransportShared *shared, NS6TransportReader *reader) {
+    if (shared && reader) {
+        active_shared = shared;
+        active_reader = reader;
+    } else {
+        active_shared = &default_shared;
+        active_reader = &default_reader;
+    }
 }
 
 void ns6_transport_reset_shared(NS6TransportShared *shared) {
@@ -232,44 +244,44 @@ UInt32 ns6_transport_advance_shared(NS6TransportShared *shared, UInt32 frames) {
 
 /* Existing in-process entry points remain source-compatible during migration. */
 void ns6_transport_reset(void) {
-    ns6_transport_reset_shared(&default_shared);
-    default_reader.read_fraction = 0.0;
+    ns6_transport_reset_shared(active_shared);
+    active_reader->read_fraction = 0.0;
 }
 
 void ns6_transport_discard(void) {
-    ns6_transport_discard_shared(&default_shared, &default_reader);
+    ns6_transport_discard_shared(active_shared, active_reader);
 }
 
 bool ns6_transport_enqueue_at(const void *input, UInt64 sample_time, UInt32 count,
                               const AudioStreamBasicDescription *format) {
-    return ns6_transport_enqueue_at_shared(&default_shared, input, sample_time, count, format);
+    return ns6_transport_enqueue_at_shared(active_shared, input, sample_time, count, format);
 }
 
 bool ns6_transport_enqueue(const void *input, UInt32 count,
                            const AudioStreamBasicDescription *format) {
-    return ns6_transport_enqueue_shared(&default_shared, input, count, format);
+    return ns6_transport_enqueue_shared(active_shared, input, count, format);
 }
 
 UInt32 ns6_transport_available(void) {
-    return ns6_transport_available_shared(&default_shared);
+    return ns6_transport_available_shared(active_shared);
 }
 
 UInt32 ns6_transport_dequeue(void *output, UInt32 capacity) {
-    return ns6_transport_dequeue_shared(&default_shared, &default_reader, output, capacity);
+    return ns6_transport_dequeue_shared(active_shared, active_reader, output, capacity);
 }
 
 UInt32 ns6_transport_dequeue_resampled(void *output, UInt32 output_frames,
                                        double source_frames_per_output_frame) {
-    return ns6_transport_dequeue_resampled_shared(&default_shared, &default_reader, output,
+    return ns6_transport_dequeue_resampled_shared(active_shared, active_reader, output,
                                                   output_frames, source_frames_per_output_frame);
 }
 
 UInt32 ns6_transport_advance_resampled(UInt32 output_frames,
                                        double source_frames_per_output_frame) {
-    return ns6_transport_advance_resampled_shared(&default_shared, &default_reader,
+    return ns6_transport_advance_resampled_shared(active_shared, active_reader,
                                                   output_frames, source_frames_per_output_frame);
 }
 
 UInt32 ns6_transport_advance(UInt32 frames) {
-    return ns6_transport_advance_shared(&default_shared, frames);
+    return ns6_transport_advance_shared(active_shared, frames);
 }
