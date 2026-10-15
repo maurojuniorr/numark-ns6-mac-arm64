@@ -64,7 +64,7 @@ hardware testing, that latency matched Mixxx's report.
 
 ## 🏗️ How the driver is put together
 
-The experimental 0.2.173 build moves USB ownership into a persistent,
+The experimental 0.2.174 build moves USB ownership into a persistent,
 per-user LaunchAgent. The Core Audio HAL plug-in and MIDI bridge communicate
 with that owner through Mach IPC and shared-memory audio rings. The real-time
 HAL callback only copies PCM to or from those rings; USB and MIDI operations
@@ -81,7 +81,7 @@ packet/transfer errors, and recovery events.
 
 ## ⚠️ Current limitations
 
-- **Persistent USB ownership is experimental.** The 0.2.173 package has passed
+- **Persistent USB ownership is experimental.** The 0.2.174 package has passed
   local unit, IPC, HAL-boundary, packaging, and arm64 build checks, but has not
   yet completed hardware acceptance. The published stable release remains the
   safer choice until the experimental package is installed and exercised.
@@ -140,8 +140,8 @@ To build the experimental persistent-owner package locally:
 make experimental-package
 ```
 
-The 0.2.173 package is written to
-`coreaudio/build-experimental/dist/` and is deliberately separate from the
+The 0.2.174 package is written to
+`coreaudio/build-experimental/dist-0.2.174/` and is deliberately separate from the
 published stable release. Do not treat it as a stable release until hardware
 acceptance is complete. For USB descriptor diagnostics,
 build and run the read-only probe separately:

@@ -6,6 +6,7 @@
 #include "NS6IOClientAccounting.h"
 #include "NS6IOMetrics.h"
 #include "NS6DeviceClient.h"
+#include "NS6HALMapping.h"
 #include <CoreAudio/AudioHardware.h>
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <CoreFoundation/CFPlugInCOM.h>
@@ -62,6 +63,9 @@ static pthread_once_t usb_monitor_once=PTHREAD_ONCE_INIT;
 static pthread_once_t io_metrics_once=PTHREAD_ONCE_INIT;
 static pthread_mutex_t stream_lock=PTHREAD_MUTEX_INITIALIZER;
 static NS6DeviceClient device_client={.service_port=MACH_PORT_NULL};
+static NS6HALMapping callback_mapping;
+static atomic_bool service_ready;
+static atomic_bool service_superseded;
 static AudioStreamBasicDescription stream_format={SAMPLE_RATE,kAudioFormatLinearPCM,kAudioFormatFlagIsFloat|kAudioFormatFlagsNativeEndian|kAudioFormatFlagIsPacked,16,1,16,CHANNELS,32,0};
 static AudioStreamBasicDescription input_stream_format={SAMPLE_RATE,kAudioFormatLinearPCM,kAudioFormatFlagIsFloat|kAudioFormatFlagsNativeEndian|kAudioFormatFlagIsPacked,8,1,8,2,32,0};
 
@@ -99,6 +103,72 @@ static void usb_changed(void *reference,io_iterator_t iterator){(void)reference;
 static void *usb_monitor_thread(void *unused){(void)unused;usb_notifications=IONotificationPortCreate(kIOMainPortDefault);if(!usb_notifications)return NULL;CFRunLoopAddSource(CFRunLoopGetCurrent(),IONotificationPortGetRunLoopSource(usb_notifications),kCFRunLoopDefaultMode);if(IOServiceAddMatchingNotification(usb_notifications,kIOFirstMatchNotification,IOServiceMatching("IOUSBHostDevice"),usb_changed,NULL,&usb_added)==KERN_SUCCESS)usb_changed(NULL,usb_added);if(IOServiceAddMatchingNotification(usb_notifications,kIOTerminatedNotification,IOServiceMatching("IOUSBHostDevice"),usb_changed,NULL,&usb_removed)==KERN_SUCCESS)usb_changed(NULL,usb_removed);CFRunLoopRun();return NULL;}
 static void monitor_usb(void){pthread_t thread;if(pthread_create(&thread,NULL,usb_monitor_thread,NULL)==0)pthread_detach(thread);}
 
+static void publish_device_mapping_locked(void){
+    ns6_hal_mapping_withdraw(&callback_mapping);
+    if(device_client.connected&&device_client.shared_memory){
+        ns6_hal_mapping_publish(&callback_mapping,device_client.shared_memory,device_client.session_id);
+        atomic_store_explicit(&service_ready,true,memory_order_release);
+    }else atomic_store_explicit(&service_ready,false,memory_order_release);
+}
+static void *device_service_monitor(void *unused){
+    (void)unused;
+    const struct timespec interval={1,0};
+    for(;;){
+        nanosleep(&interval,NULL);
+        pthread_mutex_lock(&stream_lock);
+        NS6DeviceStateSnapshot snapshot={0};
+        NS6DeviceClientStateResult state_result=device_client.connected?
+            ns6_device_client_get_state_result(&device_client,&snapshot):NS6_DEVICE_CLIENT_STATE_UNAVAILABLE;
+        if(state_result==NS6_DEVICE_CLIENT_STATE_REPLACED){
+            ns6_hal_mapping_withdraw(&callback_mapping);
+            atomic_store_explicit(&service_ready,false,memory_order_release);
+            if(!atomic_exchange_explicit(&service_superseded,true,memory_order_acq_rel))
+                os_log(OS_LOG_DEFAULT,"Numark NS6 HAL session was superseded by a replacement helper; this helper will not reclaim USB ownership");
+            pthread_mutex_unlock(&stream_lock);
+            continue;
+        }
+        if(state_result==NS6_DEVICE_CLIENT_STATE_READY){
+            atomic_store_explicit(&service_superseded,false,memory_order_release);
+            if(!atomic_load_explicit(&service_ready,memory_order_acquire)){
+                bool active=atomic_load_explicit(&io_clients,memory_order_acquire)>0;
+                if(ns6_device_client_set_audio_active(&device_client,active)){
+                    publish_device_mapping_locked();
+                    os_log(OS_LOG_DEFAULT,"Numark NS6 HAL reattached to service session %llu after service readiness returned",device_client.session_id);
+                }
+            }
+            pthread_mutex_unlock(&stream_lock);
+            continue;
+        }
+
+        NS6DeviceClient replacement={.service_port=MACH_PORT_NULL};
+        bool connected=ns6_device_client_connect(&replacement)&&
+                       ns6_device_client_set_startup_buffer(&replacement,atomic_load_explicit(&driver_buffer_frames,memory_order_acquire));
+        bool active=atomic_load_explicit(&io_clients,memory_order_acquire)>0;
+        if(connected)connected=ns6_device_client_set_audio_active(&replacement,active);
+        if(connected){
+            NS6DeviceClient previous=device_client;
+            device_client=replacement;
+            publish_device_mapping_locked();
+            atomic_store_explicit(&service_superseded,false,memory_order_release);
+            ns6_device_client_disconnect(&previous);
+            os_log(OS_LOG_DEFAULT,"Numark NS6 HAL reconnected to restarted USB service session %llu; active clients %u",device_client.session_id,atomic_load_explicit(&io_clients,memory_order_relaxed));
+        }else{
+            ns6_device_client_disconnect(&replacement);
+            ns6_hal_mapping_withdraw(&callback_mapping);
+            if(device_client.connected)ns6_device_client_disconnect(&device_client);
+            atomic_store_explicit(&service_ready,false,memory_order_release);
+            os_log_error(OS_LOG_DEFAULT,"Numark NS6 HAL service monitor could not reconnect; callbacks will remain silent and retry");
+        }
+        pthread_mutex_unlock(&stream_lock);
+    }
+    return NULL;
+}
+static void start_device_service_monitor(void){
+    pthread_t thread;
+    if(pthread_create(&thread,NULL,device_service_monitor,NULL)==0)pthread_detach(thread);
+    else os_log_error(OS_LOG_DEFAULT,"Numark NS6 HAL failed to start its non-realtime service monitor");
+}
+
 void *NS6_Create(CFAllocatorRef allocator,CFUUIDRef type){(void)allocator;return CFEqual(type,kAudioServerPlugInTypeUUID)?driver:NULL;}
 static bool valid_object(AudioObjectID object){return object==kAudioObjectPlugInObject||object==DEVICE_ID||object==STREAM_ID||object==INPUT_STREAM_ID;}
 static bool supported_buffer_size(UInt32 frames);
@@ -108,6 +178,7 @@ static OSStatus initialize(AudioServerPlugInDriverRef value,AudioServerPlugInHos
     if(value!=driver)return kAudioHardwareBadObjectError;
     host=value_host;
     mach_timebase_info(&timebase);
+    ns6_hal_mapping_init(&callback_mapping);
     device_client.service_port=MACH_PORT_NULL;
     if(host->CopyFromStorage){
         CFPropertyListRef stored=NULL;
@@ -119,12 +190,15 @@ static OSStatus initialize(AudioServerPlugInDriverRef value,AudioServerPlugInHos
         if(stored)CFRelease(stored);
     }
     atomic_store(&device_present,ns6_connected());
-    if(ns6_device_client_connect(&device_client)){
-        (void)ns6_device_client_set_startup_buffer(&device_client,atomic_load(&driver_buffer_frames));
+    if(ns6_device_client_connect(&device_client)&&
+       ns6_device_client_set_startup_buffer(&device_client,atomic_load(&driver_buffer_frames))){
+        publish_device_mapping_locked();
         os_log(OS_LOG_DEFAULT,"Numark NS6 HAL mapped persistent device service session %llu",device_client.session_id);
     }else{
+        ns6_device_client_disconnect(&device_client);
         os_log_error(OS_LOG_DEFAULT,"Numark NS6 HAL could not connect to persistent USB service during initialize");
     }
+    start_device_service_monitor();
     pthread_once(&usb_monitor_once,monitor_usb);
     return 0;
 }
@@ -232,7 +306,10 @@ static OSStatus set_property(AudioServerPlugInDriverRef d,AudioObjectID o,pid_t 
     if(status!=noErr)return status;
     atomic_store_explicit(&buffer_restart_pending,true,memory_order_release);
     atomic_store_explicit(&buffer_restart_state,1,memory_order_release);
-    bool applied=ns6_device_client_set_startup_buffer(&device_client,frames);
+    pthread_mutex_lock(&stream_lock);
+    bool applied=atomic_load_explicit(&service_ready,memory_order_acquire)&&
+                 ns6_device_client_set_startup_buffer(&device_client,frames);
+    pthread_mutex_unlock(&stream_lock);
     if(applied){
         atomic_store_explicit(&driver_buffer_frames,frames,memory_order_release);
         atomic_store_explicit(&buffer_restart_state,4,memory_order_release);
@@ -255,13 +332,8 @@ static OSStatus start_io(AudioServerPlugInDriverRef d,AudioObjectID object,UInt3
     pthread_mutex_lock(&stream_lock);
     unsigned clients=atomic_load_explicit(&io_clients,memory_order_acquire);
     unsigned clients_before=clients;
-    bool activated=device_client.connected&&ns6_device_client_set_audio_active(&device_client,true);
-    if(!activated&&!clients){
-        ns6_device_client_disconnect(&device_client);
-        activated=ns6_device_client_connect(&device_client)&&
-                  ns6_device_client_set_startup_buffer(&device_client,atomic_load(&driver_buffer_frames))&&
-                  ns6_device_client_set_audio_active(&device_client,true);
-    }
+    bool activated=atomic_load_explicit(&service_ready,memory_order_acquire)&&device_client.connected&&
+                   ns6_device_client_set_audio_active(&device_client,true);
     if(!activated){pthread_mutex_unlock(&stream_lock);os_log_error(OS_LOG_DEFAULT,"Numark NS6 StartIO failed: persistent USB service unavailable");return kAudioHardwareUnspecifiedError;}
     NS6TrackedClient *active_client=find_client_locked(client);
     if(active_client){ns6_io_client_account_start(&active_client->starts,&clients);active_client->order=++client_order;refresh_client_identity_locked();}
@@ -302,20 +374,38 @@ static OSStatus do_io(AudioServerPlugInDriverRef d,AudioObjectID object,AudioObj
     if(stream==INPUT_STREAM_ID){
         if(operation!=kAudioServerPlugInIOOperationReadInput)return kAudioHardwareIllegalOperationError;
         if(!main_buffer&&frames)return kAudioHardwareIllegalOperationError;
-        if(!device_client.shared_memory)return kAudioHardwareNotRunningError;
-        NS6SharedMemory *memory=device_client.shared_memory;
+        NS6HALMappingLease lease;
+        if(!ns6_hal_mapping_acquire(&callback_mapping,&lease)){
+            if(main_buffer&&frames)memset(main_buffer,0,(size_t)frames*2*sizeof(float));
+            return 0;
+        }
+        NS6SharedMemory *memory=lease.memory;
+        if(!ns6_device_session_io_begin(&memory->session,lease.session_id)){
+            if(main_buffer&&frames)memset(main_buffer,0,(size_t)frames*2*sizeof(float));
+            ns6_hal_mapping_release(&callback_mapping);
+            return 0;
+        }
         uint64_t now_ns=io_monotonic_ns();
         if(!atomic_exchange_explicit(&memory->capture_requested,true,memory_order_acq_rel))
             ns6_capture_ring_clear(&memory->capture);
         atomic_store_explicit(&memory->capture_last_demand_ns,now_ns,memory_order_release);
         (void)ns6_capture_ring_read(&memory->capture,(float*)main_buffer,frames);
+        ns6_device_session_io_end(&memory->session);
+        ns6_hal_mapping_release(&callback_mapping);
         return 0;
     }
     if(stream!=STREAM_ID)return kAudioHardwareBadObjectError;
     if(operation==kAudioServerPlugInIOOperationWriteMix){
+        NS6HALMappingLease lease;
+        if(!ns6_hal_mapping_acquire(&callback_mapping,&lease))return 0;
+        NS6SharedMemory *memory=lease.memory;
+        if(!ns6_device_session_io_begin(&memory->session,lease.session_id)){
+            ns6_hal_mapping_release(&callback_mapping);
+            return 0;
+        }
         ns6_active_flow_record(&active_flow,frames,client,mach_absolute_time());
         uint64_t callback_start_ns=io_monotonic_ns();
-        NS6TransportShared *output_ring=device_client.shared_memory?&device_client.shared_memory->output:NULL;
+        NS6TransportShared *output_ring=&memory->output;
         bool accepted=ns6_transport_enqueue_shared(output_ring,main_buffer,frames,&stream_format);
         uint64_t callback_end_ns=io_monotonic_ns();
         uint64_t callback_ns=callback_end_ns>=callback_start_ns?callback_end_ns-callback_start_ns:0;
@@ -327,8 +417,12 @@ static OSStatus do_io(AudioServerPlugInDriverRef d,AudioObjectID object,AudioObj
             uint_fast64_t previous=atomic_load_explicit(&last_enqueue_log_ms,memory_order_relaxed);
             if(failures==1||(now_ms-previous>=1000&&atomic_compare_exchange_strong_explicit(&last_enqueue_log_ms,&previous,(uint_fast64_t)now_ms,memory_order_relaxed,memory_order_relaxed)))
                 os_log_error(OS_LOG_DEFAULT,"Numark NS6 rejected CoreAudio buffer: %u cumulative failures, %u input frames, %u queued USB frames",failures,frames,output_ring?ns6_transport_available_shared(output_ring):0);
+            ns6_device_session_io_end(&memory->session);
+            ns6_hal_mapping_release(&callback_mapping);
             return kAudioHardwareUnspecifiedError;
         }
+        ns6_device_session_io_end(&memory->session);
+        ns6_hal_mapping_release(&callback_mapping);
     }
     return 0;
 }

@@ -11,6 +11,7 @@ bool ns6_usb_request_restart(void);
 bool ns6_usb_is_ready(void);
 void ns6_usb_stop(void);
 void ns6_usb_set_paused(bool paused);
+void ns6_usb_reset_capture_session(void);
 void ns6_usb_log_io_transition(const char *event, uint32_t client,
     unsigned clients_before, unsigned clients_after);
 size_t ns6_usb_capture_read(float *output,size_t frames);

@@ -19,9 +19,9 @@ BUILD := build/NumarkNS6.driver/Contents
 DRIVER_BUNDLE := $(patsubst %/Contents,%,$(BUILD))
 APP := build/NumarkNS6Status.app
 EXPERIMENTAL_SERVICE := build-experimental/NumarkNS6DeviceService
-EXPERIMENTAL_VERSION ?= 0.2.173
-EXPERIMENTAL_PACKAGE_ROOT := build-experimental/package-root
-EXPERIMENTAL_DIST := build-experimental/dist
+EXPERIMENTAL_VERSION ?= 0.2.174
+EXPERIMENTAL_PACKAGE_ROOT := build-experimental/package-root-$(EXPERIMENTAL_VERSION)
+EXPERIMENTAL_DIST := build-experimental/dist-$(EXPERIMENTAL_VERSION)
 VERSION ?= 0.2.127
 BUNDLE_BUILD_VERSION ?= $(shell echo $(VERSION) | awk -F. '{print $$3}')
 PACKAGE_ID := io.github.maurojuniorr.numark-ns6
@@ -30,7 +30,7 @@ DIST := dist
 SWIFT_MODULE_CACHE := /tmp/ns6-macos-swift-module-cache
 FORCE:
 
-.PHONY: FORCE usb-work-interval-regression-test audio-recovery-test zero-timestamp-test capture-decoder-test capture-ring-test capture-test bulk-in-idle-policy-test io-client-accounting-test device-ipc-test device-owner-test device-service hal-service-boundary-test service-lifecycle-test experimental-package
+.PHONY: FORCE usb-work-interval-regression-test audio-recovery-test zero-timestamp-test capture-decoder-test capture-ring-test capture-test bulk-in-idle-policy-test io-client-accounting-test device-ipc-test device-owner-test device-session-test hal-mapping-test device-service hal-service-boundary-test service-lifecycle-test experimental-package
 
 bulk-in-idle-policy-test: NS6BulkINIdlePolicyTest.c NS6BulkINIdlePolicy.h
 	$(CC) -std=c11 -Wall -Wextra -Werror NS6BulkINIdlePolicyTest.c -o build/ns6-bulk-in-idle-test
@@ -86,7 +86,7 @@ feedback-telemetry-test: NS6FeedbackTelemetryTest.c NS6FeedbackTelemetry.h
 
 all: $(BUILD)/MacOS/NumarkNS6 $(BUILD)/Info.plist app midi-bridge
 
-$(BUILD)/MacOS/NumarkNS6: FORCE NS6HAL.c NS6DeviceClient.c NS6DeviceClient.h NS6DeviceProtocol.h NS6SharedMemory.h NS6CaptureRing.h NS6Transport.c NS6Transport.h NS6BufferFrameSize.h NS6ZeroTimestamp.h NS6ActiveFlow.h NS6IOClientAccounting.h NS6IOMetrics.c NS6IOMetrics.h
+$(BUILD)/MacOS/NumarkNS6: FORCE NS6HAL.c NS6HALMapping.h NS6DeviceClient.c NS6DeviceClient.h NS6DeviceProtocol.h NS6SharedMemory.h NS6CaptureRing.h NS6Transport.c NS6Transport.h NS6BufferFrameSize.h NS6ZeroTimestamp.h NS6ActiveFlow.h NS6IOClientAccounting.h NS6IOMetrics.c NS6IOMetrics.h
 	mkdir -p $(BUILD)/MacOS
 	$(CC) $(CFLAGS) $(DRIVER_OPT_FLAGS) -bundle NS6HAL.c NS6DeviceClient.c NS6Transport.c NS6IOMetrics.c -o $@ -framework CoreAudio -framework CoreFoundation -framework IOKit
 $(BUILD)/Info.plist: Info.plist FORCE
@@ -170,6 +170,15 @@ device-owner-test: NS6DeviceOwnerTest.c NS6DeviceOwner.h NS6SharedMemory.h NS6Tr
 	$(CC) -std=c11 -Wall -Wextra -Werror NS6DeviceOwnerTest.c NS6Transport.c -o build/ns6-device-owner-test -framework CoreAudio -lm
 	build/ns6-device-owner-test
 
+device-session-test: NS6DeviceSessionTest.c NS6DeviceSession.h
+	$(CC) -std=c11 -Wall -Wextra -Werror NS6DeviceSessionTest.c -o build/ns6-device-session-test -pthread
+	build/ns6-device-session-test
+
+hal-mapping-test: NS6HALMappingTest.c NS6HALMapping.h
+	mkdir -p build
+	$(CC) -std=c11 -Wall -Wextra -Werror NS6HALMappingTest.c -o build/ns6-hal-mapping-test -pthread
+	build/ns6-hal-mapping-test
+
 hal-service-boundary-test: NS6HALServiceBoundaryTest.py NS6HAL.c
 	python3 NS6HALServiceBoundaryTest.py
 
@@ -178,17 +187,23 @@ service-lifecycle-test: NS6ServiceLifecycleTest.py launch-agents/io.github.mauro
 
 device-service: $(EXPERIMENTAL_SERVICE)
 
+build-experimental/NS6DeviceServiceProbe: NS6DeviceServiceProbe.c NS6DeviceClient.c NS6DeviceClient.h NS6DeviceProtocol.h NS6SharedMemory.h NS6CaptureRing.h NS6Transport.h
+	mkdir -p build-experimental
+	$(CC) $(CFLAGS) $(DRIVER_OPT_FLAGS) NS6DeviceServiceProbe.c NS6DeviceClient.c -o $@ -framework CoreAudio
+
 $(EXPERIMENTAL_SERVICE): FORCE NS6MIDIBridge.c NS6DeviceMachService.c NS6DeviceOwner.h NS6SharedMemory.h NS6Transport.c NS6USB.c NS6USB.h NS6USBEndpoint.h NS6USBConfig.h NS6USBTiming.c NS6USBTiming.h NS6ClockControl.c NS6ClockControl.h NS6FeedbackTelemetry.h NS6MIDI.c NS6MIDI.h NS6IOMetrics.c NS6IOMetrics.h NS6AudioRecovery.c NS6AudioRecovery.h NS6FirmwareVersion.c NS6FirmwareVersion.h
 	mkdir -p build-experimental
 	$(CC) $(CFLAGS) -DNS6_DEVICE_SERVICE_BUILD=1 $(DRIVER_OPT_FLAGS) NS6MIDIBridge.c NS6DeviceMachService.c NS6Transport.c NS6USB.c NS6USBTiming.c NS6ClockControl.c NS6MIDI.c NS6IOMetrics.c NS6AudioRecovery.c NS6FirmwareVersion.c -o $@ -framework CoreAudio -framework CoreFoundation -framework CoreMIDI -framework IOKit -lm -pthread
 
 experimental-package: VERSION := $(EXPERIMENTAL_VERSION)
-experimental-package: service-lifecycle-test sign device-service
+experimental-package: service-lifecycle-test hal-mapping-test sign device-service build-experimental/NS6DeviceServiceProbe
 	rm -rf $(EXPERIMENTAL_PACKAGE_ROOT) $(EXPERIMENTAL_DIST)
 	mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources $(EXPERIMENTAL_PACKAGE_ROOT)/Library/Audio/Plug-Ins/HAL $(EXPERIMENTAL_PACKAGE_ROOT)/Library/LaunchAgents $(EXPERIMENTAL_PACKAGE_ROOT)/Applications $(EXPERIMENTAL_DIST)
 	cp $(EXPERIMENTAL_SERVICE) $(APP)/Contents/MacOS/NumarkNS6DeviceService
-	chmod 755 $(APP)/Contents/MacOS/NumarkNS6DeviceService
+	cp build-experimental/NS6DeviceServiceProbe $(APP)/Contents/Resources/ns6-service-probe
+	chmod 755 $(APP)/Contents/MacOS/NumarkNS6DeviceService $(APP)/Contents/Resources/ns6-service-probe
 	cp rollback-persistent-service.sh $(APP)/Contents/Resources/rollback-persistent-service
+	chmod 755 $(APP)/Contents/Resources/rollback-persistent-service
 	codesign --force --sign - --timestamp=none $(APP)/Contents/MacOS/NumarkNS6DeviceService
 	codesign --force --sign - --timestamp=none $(APP)
 	ditto --norsrc --noextattr $(DRIVER_BUNDLE) $(EXPERIMENTAL_PACKAGE_ROOT)/Library/Audio/Plug-Ins/HAL/NumarkNS6M1.driver

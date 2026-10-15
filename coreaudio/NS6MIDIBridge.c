@@ -65,10 +65,7 @@ static bool start_device_service(void) {
     ns6_transport_bind_shared(&shared_memory->output, &transport_reader);
     ns6_usb_bind_shared_capture(&shared_memory->capture,&shared_memory->capture_requested,
                                 &shared_memory->capture_last_demand_ns);
-    bool ready = ns6_usb_start();
-    if (ready) ns6_usb_set_paused(true);
     if (!ns6_device_service_publish(shared_memory)) {
-        if (ready) ns6_usb_stop();
         ns6_transport_bind_shared(NULL, NULL);
         ns6_usb_bind_shared_capture(NULL,NULL,NULL);
         mach_vm_deallocate(mach_task_self(), shared_memory_address, shared_memory_allocation_size);
@@ -77,6 +74,8 @@ static bool start_device_service(void) {
         shared_memory_allocation_size = 0;
         return false;
     }
+    bool ready = ns6_usb_start();
+    if (ready) ns6_usb_set_paused(!ns6_device_service_audio_active());
     next_usb_retry_ms = 0;
     usb_state_known = false;
     last_reported_usb_ready = false;

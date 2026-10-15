@@ -61,9 +61,6 @@ static void handle_hello(NS6DeviceHelloRequest *request) {
     reply.header.msgh_id = NS6_DEVICE_MSG_HELLO_REPLY;
     reply.protocol_version = NS6_DEVICE_PROTOCOL_VERSION;
     reply.shared_struct_size = sizeof(NS6SharedMemory);
-    reply.mapped_size = service.mapping_size;
-    reply.memory_offset = service.memory_offset;
-    reply.session_id = service.session_id;
     reply.status = KERN_SUCCESS;
     if (!ns6_device_protocol_version_supported(request->protocol_version) ||
         request->client_struct_size != sizeof(NS6SharedMemory)) {
@@ -75,6 +72,27 @@ static void handle_hello(NS6DeviceHelloRequest *request) {
         (void)send_reply(&reply.header, sizeof(reply));
         return;
     }
+    bool was_audio_active=atomic_load_explicit(&service.audio_active,memory_order_acquire);
+    ns6_usb_set_paused(true);
+    uint64_t next_session = service.session_id + 1;
+    if (next_session == 0 ||
+        !ns6_device_session_begin(&service.memory->session, next_session)) {
+        ns6_usb_set_paused(!was_audio_active);
+        reply.status = KERN_RESOURCE_SHORTAGE;
+        reply.mapped_size = 0;
+        reply.memory_entry.name = MACH_PORT_NULL;
+        reply.memory_entry.disposition = 0;
+        reply.memory_entry.type = 0;
+        (void)send_reply(&reply.header, sizeof(reply));
+        return;
+    }
+    service.session_id = next_session;
+    atomic_store_explicit(&service.audio_active, false, memory_order_release);
+    ns6_transport_discard();
+    ns6_usb_reset_capture_session();
+    reply.mapped_size = service.mapping_size;
+    reply.memory_offset = service.memory_offset;
+    reply.session_id = service.session_id;
     reply.header.msgh_bits |= MACH_MSGH_BITS_COMPLEX;
     reply.body.msgh_descriptor_count = 1;
     reply.memory_entry.name = service.memory_entry;
@@ -86,6 +104,10 @@ static void handle_hello(NS6DeviceHelloRequest *request) {
 static void handle_control(NS6DeviceControlRequest *request) {
     if (!ns6_device_protocol_version_supported(request->protocol_version)) {
         reply_control(&request->header, MIG_BAD_ARGUMENTS);
+        return;
+    }
+    if (!ns6_device_session_is_current(&service.memory->session, request->session_id)) {
+        reply_control(&request->header, MIG_BAD_ID);
         return;
     }
     kern_return_t status = KERN_SUCCESS;
@@ -118,7 +140,7 @@ static void handle_control(NS6DeviceControlRequest *request) {
     reply_control(&request->header, status);
 }
 
-static void handle_state(mach_msg_header_t *request) {
+static void handle_state(NS6DeviceControlRequest *request) {
     struct {
         mach_msg_header_t header;
         kern_return_t status;
@@ -126,9 +148,11 @@ static void handle_state(mach_msg_header_t *request) {
     } reply = {0};
     reply.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
     reply.header.msgh_size = sizeof(reply);
-    reply.header.msgh_remote_port = request->msgh_remote_port;
+    reply.header.msgh_remote_port = request->header.msgh_remote_port;
     reply.header.msgh_id = NS6_DEVICE_MSG_STATE_REPLY;
-    reply.status = KERN_SUCCESS;
+    reply.status = ns6_device_protocol_version_supported(request->protocol_version) &&
+                   ns6_device_session_is_current(&service.memory->session, request->session_id)
+                       ? KERN_SUCCESS : MIG_BAD_ID;
     pthread_mutex_lock(&state_lock);
     reply.snapshot = service.snapshot;
     pthread_mutex_unlock(&state_lock);
@@ -154,8 +178,9 @@ static void *service_thread(void *unused) {
         if (request.header.msgh_id == NS6_DEVICE_MSG_HELLO &&
             request.header.msgh_size >= sizeof(NS6DeviceHelloRequest)) {
             handle_hello((NS6DeviceHelloRequest *)&request);
-        } else if (request.header.msgh_id == NS6_DEVICE_MSG_GET_STATE) {
-            handle_state(&request.header);
+        } else if (request.header.msgh_id == NS6_DEVICE_MSG_GET_STATE &&
+                   request.header.msgh_size >= sizeof(NS6DeviceControlRequest)) {
+            handle_state((NS6DeviceControlRequest *)&request);
         } else if (request.header.msgh_size >= sizeof(NS6DeviceControlRequest)) {
             handle_control((NS6DeviceControlRequest *)&request);
         } else {
@@ -198,6 +223,7 @@ bool ns6_device_service_publish(NS6SharedMemory *memory) {
     service.mapping_size = length;
     service.memory_offset = offset;
     service.session_id = mach_absolute_time() ^ (uint64_t)(uintptr_t)memory;
+    if (service.session_id == 0) service.session_id = 1;
     pthread_mutex_lock(&state_lock);
     service.snapshot.connected = 0;
     service.snapshot.transport_ready = 0;

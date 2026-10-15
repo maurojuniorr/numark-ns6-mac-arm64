@@ -77,7 +77,7 @@ logs the per-frame USB timestamps. `newest age` compares the last frame's
 monotonic timestamp with callback delivery; this distinguishes late callback
 delivery from a gap in frame processing.
 
-## Experimental persistent USB owner (0.2.173)
+## Experimental persistent USB owner (0.2.174)
 
 The experimental package runs one per-user LaunchAgent as the persistent NS6
 USB/MIDI owner. The HAL connects to it through Mach IPC and maps shared output
@@ -91,6 +91,14 @@ callback. The service keeps the USB owner alive across client-flow changes and
 resumes the output after USB recovery when an audio client is still active.
 The LaunchAgent runs in the logged-in GUI session; behavior across logout,
 fast-user switching, and system sleep still needs hardware testing.
+
+This build also monitors the Mach service from a non-realtime HAL thread and
+reconnects the shared-memory session after a service restart. HAL callbacks pin
+the published mapping while using it, so the monitor can retire an old mapping
+without unmapping memory still in use. Installation verifies the Mach protocol
+with a small probe, and the rollback snapshot includes the HAL, Status app, and
+both MIDI/service LaunchAgents. These recovery and installer paths still need
+hardware acceptance.
 
 ## Build and install
 
@@ -117,15 +125,17 @@ make package
 ```
 
 The package is written to
-`build-experimental/dist/NumarkNS6-0.2.173-experimental-persistent-owner.pkg`.
+`build-experimental/dist-0.2.174/NumarkNS6-0.2.174-experimental-persistent-owner.pkg`.
 It is not the published stable package and has not completed hardware
-acceptance. The installer saves the existing HAL and MIDI LaunchAgent so the
-bundled rollback command can restore them. Review the package before installing;
+acceptance. The installer snapshots the existing HAL, Status app, and
+LaunchAgents so the bundled rollback command can restore the prior
+installation. It probes the live Mach protocol before restarting CoreAudio.
+Review the package before installing;
 installation requires administrator authorization and restarts CoreAudio.
 For installation from Terminal:
 
 ```sh
-sudo installer -pkg build-experimental/dist/NumarkNS6-0.2.173-experimental-persistent-owner.pkg -target /
+sudo installer -pkg build-experimental/dist-0.2.174/NumarkNS6-0.2.174-experimental-persistent-owner.pkg -target /
 ```
 
 The package installs the arm64 HAL bundle, **Numark NS6 Status**, and the
@@ -140,5 +150,5 @@ make uninstall
 ```
 
 This invokes the rollback script from the installed Status app and restores the
-saved HAL and MIDI bridge. The rollback copy is kept under
+saved HAL, Status app, and LaunchAgents. The rollback snapshot is kept under
 `/Library/Application Support/Numark NS6/rollback-previous`.

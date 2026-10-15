@@ -1,5 +1,6 @@
 #include "NS6DeviceClient.h"
 #include "NS6USB.h"
+#include "NS6Transport.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -15,6 +16,7 @@ static uint32_t fake_startup_buffer_frames;
 bool ns6_usb_is_ready(void) { return fake_usb_ready; }
 bool ns6_usb_request_restart(void) { return fake_usb_ready; }
 void ns6_usb_set_paused(bool paused) { fake_usb_paused = paused; }
+void ns6_usb_reset_capture_session(void) {}
 void ns6_usb_set_startup_buffer_frames(uint32_t frames) { fake_startup_buffer_frames = frames; }
 
 typedef struct {
@@ -36,25 +38,60 @@ static void *fake_service_thread(void *opaque) {
                                        MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
         if (result != KERN_SUCCESS) break;
         if (request.header.msgh_id == 99) break;
-        assert(request.header.msgh_id == NS6_DEVICE_MSG_HELLO);
-        NS6DeviceHelloRequest *hello = (NS6DeviceHelloRequest *)&request;
-        NS6DeviceHelloReply reply = {0};
-        reply.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0) | MACH_MSGH_BITS_COMPLEX;
-        reply.header.msgh_size = sizeof(reply);
-        reply.header.msgh_remote_port = request.header.msgh_remote_port;
-        reply.header.msgh_id = NS6_DEVICE_MSG_HELLO_REPLY;
-        reply.body.msgh_descriptor_count = 1;
-        reply.memory_entry.name = service->memory_entry;
-        reply.memory_entry.disposition = MACH_MSG_TYPE_COPY_SEND;
-        reply.memory_entry.type = MACH_MSG_PORT_DESCRIPTOR;
-        reply.protocol_version = hello->protocol_version;
-        reply.shared_struct_size = sizeof(NS6SharedMemory);
-        reply.mapped_size = service->mapped_size;
-        reply.memory_offset = (uintptr_t)service->memory & (vm_page_size - 1u);
-        reply.session_id = service->session_id;
-        reply.status = KERN_SUCCESS;
-        (void)mach_msg(&reply.header, MACH_SEND_MSG, sizeof(reply), 0,
-                       MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+        if (request.header.msgh_id == NS6_DEVICE_MSG_HELLO) {
+            NS6DeviceHelloRequest *hello = (NS6DeviceHelloRequest *)&request;
+            uint64_t next_session = service->session_id + 1;
+            assert(ns6_device_session_begin(&service->memory->session, next_session));
+            service->session_id = next_session;
+            ns6_transport_init_shared(&service->memory->output);
+            ns6_capture_ring_clear(&service->memory->capture);
+            atomic_store(&service->memory->capture_requested, false);
+            atomic_store(&service->memory->capture_last_demand_ns, 0);
+            NS6DeviceHelloReply reply = {0};
+            reply.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0) | MACH_MSGH_BITS_COMPLEX;
+            reply.header.msgh_size = sizeof(reply);
+            reply.header.msgh_remote_port = request.header.msgh_remote_port;
+            reply.header.msgh_id = NS6_DEVICE_MSG_HELLO_REPLY;
+            reply.body.msgh_descriptor_count = 1;
+            reply.memory_entry.name = service->memory_entry;
+            reply.memory_entry.disposition = MACH_MSG_TYPE_COPY_SEND;
+            reply.memory_entry.type = MACH_MSG_PORT_DESCRIPTOR;
+            reply.protocol_version = hello->protocol_version;
+            reply.shared_struct_size = sizeof(NS6SharedMemory);
+            reply.mapped_size = service->mapped_size;
+            reply.memory_offset = (uintptr_t)service->memory & (vm_page_size - 1u);
+            reply.session_id = service->session_id;
+            reply.status = KERN_SUCCESS;
+            (void)mach_msg(&reply.header, MACH_SEND_MSG, sizeof(reply), 0,
+                           MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+        } else if (request.header.msgh_id == NS6_DEVICE_MSG_SET_AUDIO_ACTIVE ||
+                   request.header.msgh_id == NS6_DEVICE_MSG_SET_STARTUP_BUFFER) {
+            NS6DeviceControlRequest *control = (NS6DeviceControlRequest *)&request;
+            NS6DeviceControlReply reply = {0};
+            reply.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+            reply.header.msgh_size = sizeof(reply);
+            reply.header.msgh_remote_port = request.header.msgh_remote_port;
+            reply.header.msgh_id = NS6_DEVICE_MSG_CONTROL_REPLY;
+            reply.status = control->session_id == service->session_id ? KERN_SUCCESS : MIG_BAD_ID;
+            if (reply.status == KERN_SUCCESS && request.header.msgh_id == NS6_DEVICE_MSG_SET_AUDIO_ACTIVE)
+                fake_usb_paused = control->value == 0;
+            (void)mach_msg(&reply.header, MACH_SEND_MSG, sizeof(reply), 0,
+                           MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+        } else if (request.header.msgh_id == NS6_DEVICE_MSG_GET_STATE) {
+            NS6DeviceControlRequest *control = (NS6DeviceControlRequest *)&request;
+            struct {
+                mach_msg_header_t header;
+                kern_return_t status;
+                NS6DeviceStateSnapshot snapshot;
+            } reply = {0};
+            reply.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+            reply.header.msgh_size = sizeof(reply);
+            reply.header.msgh_remote_port = request.header.msgh_remote_port;
+            reply.header.msgh_id = NS6_DEVICE_MSG_STATE_REPLY;
+            reply.status = control->session_id == service->session_id ? KERN_SUCCESS : MIG_BAD_ID;
+            (void)mach_msg(&reply.header, MACH_SEND_MSG, sizeof(reply), 0,
+                           MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+        }
     }
     return NULL;
 }
@@ -128,16 +165,26 @@ static void test_hal_client_restart_reuses_service_owner(void) {
     NS6DeviceClient first_hal = {0};
     first_hal.service_port = MACH_PORT_NULL;
     assert(ns6_device_client_connect_to_port(&first_hal, persistent_service.port));
-    uint64_t owner_session = first_hal.session_id;
-    assert(owner_session == 0xabc123u);
+    uint64_t old_session = first_hal.session_id;
+    assert(old_session == 0xabc124u);
     atomic_store(&first_hal.shared_memory->output.high_water, 77);
-    ns6_device_client_disconnect(&first_hal); /* CoreAudio helper restart */
+    assert(ns6_device_client_set_audio_active(&first_hal, true));
+    assert(!fake_usb_paused);
 
     NS6DeviceClient replacement_hal = {0};
     replacement_hal.service_port = MACH_PORT_NULL;
     assert(ns6_device_client_connect_to_port(&replacement_hal, persistent_service.port));
-    assert(replacement_hal.session_id == owner_session);
-    assert(atomic_load(&replacement_hal.shared_memory->output.high_water) == 77);
+    assert(replacement_hal.session_id == 0xabc125u);
+    assert(!ns6_device_session_is_current(&replacement_hal.shared_memory->session, old_session));
+    assert(atomic_load(&replacement_hal.shared_memory->output.high_water) == 0);
+    assert(ns6_device_client_set_audio_active(&replacement_hal, true));
+    assert(!fake_usb_paused);
+    NS6DeviceStateSnapshot snapshot = {0};
+    assert(ns6_device_client_get_state_result(&replacement_hal, &snapshot) == NS6_DEVICE_CLIENT_STATE_READY);
+    assert(ns6_device_client_get_state_result(&first_hal, &snapshot) == NS6_DEVICE_CLIENT_STATE_REPLACED);
+    assert(!ns6_device_client_set_audio_active(&first_hal, false));
+    assert(!fake_usb_paused);
+    ns6_device_client_disconnect(&first_hal);
     ns6_device_client_disconnect(&replacement_hal);
     fake_service_stop(&persistent_service);
 }
@@ -148,7 +195,7 @@ static void test_service_restart_reconnects_without_shared_stale_state(void) {
     NS6DeviceClient client = {0};
     client.service_port = MACH_PORT_NULL;
     assert(ns6_device_client_connect_to_port(&client, first_service.port));
-    assert(client.connected && client.session_id == 1234);
+    assert(client.connected && client.session_id == 1235);
     assert(client.shared_memory->protocol_version == NS6_SHARED_MEMORY_PROTOCOL_VERSION);
     first_service.memory->output.high_water = 8;
     ns6_device_client_disconnect(&client);
@@ -157,7 +204,7 @@ static void test_service_restart_reconnects_without_shared_stale_state(void) {
     FakeService second_service;
     fake_service_start(&second_service, 5678);
     assert(ns6_device_client_connect_to_port(&client, second_service.port));
-    assert(client.connected && client.session_id == 5678);
+    assert(client.connected && client.session_id == 5679);
     assert(atomic_load(&client.shared_memory->output.high_water) == 0);
     ns6_device_client_disconnect(&client);
     fake_service_stop(&second_service);

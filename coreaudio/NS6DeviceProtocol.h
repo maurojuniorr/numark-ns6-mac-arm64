@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #define NS6_DEVICE_SERVICE_NAME "io.github.maurojuniorr.numark-ns6-device-service"
-#define NS6_DEVICE_PROTOCOL_VERSION 2u
+#define NS6_DEVICE_PROTOCOL_VERSION 3u
 
 enum {
     NS6_DEVICE_MSG_HELLO = 0x4e530001,
@@ -39,6 +39,7 @@ typedef struct {
     mach_msg_header_t header;
     uint32_t protocol_version;
     uint32_t value;
+    uint64_t session_id;
 } NS6DeviceControlRequest;
 
 typedef struct {
