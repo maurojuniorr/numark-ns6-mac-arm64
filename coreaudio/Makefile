@@ -101,6 +101,11 @@ shared-memory-test: NS6SharedMemoryTest.c NS6SharedMemory.h NS6Transport.c NS6Tr
 	$(CC) $(CFLAGS) NS6SharedMemoryTest.c NS6Transport.c -o build/ns6-shared-memory-test -framework CoreAudio -lm
 	build/ns6-shared-memory-test
 
+device-ipc-test: NS6DeviceIPCTest.c NS6DeviceClient.c NS6DeviceMachService.c NS6DeviceClient.h NS6DeviceMachService.h NS6DeviceProtocol.h NS6SharedMemory.h NS6Transport.c NS6Transport.h
+	mkdir -p build
+	$(CC) -std=c11 -Wall -Wextra -Werror NS6DeviceIPCTest.c NS6DeviceClient.c NS6DeviceMachService.c NS6Transport.c -o build/ns6-device-ipc-test -framework CoreAudio -lm -pthread
+	build/ns6-device-ipc-test
+
 clock-control-test: NS6ClockControlTest.c NS6ClockControl.c NS6ClockControl.h
 	$(CC) -Wall -Wextra -Werror -DNS6_ADAPTIVE_CLOCK_ENABLED=1 NS6ClockControlTest.c NS6ClockControl.c -o build/ns6-clock-control-test
 	build/ns6-clock-control-test
