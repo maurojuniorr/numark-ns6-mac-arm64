@@ -1,4 +1,7 @@
 #include <CoreMIDI/CoreMIDI.h>
+#include <CoreAudio/CoreAudio.h>
+#include <os/log.h>
+#include "NS6MIDILease.h"
 #include <arpa/inet.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -15,7 +18,7 @@
 #define DRIVER_PORT 48238
 #define BRIDGE_PORT 48239
 #define MIDI_SOCKET_BUFFER (1024 * 1024)
-#define HEARTBEAT_TIMEOUT_MS 2000
+#define HEARTBEAT_TIMEOUT_MS NS6_MIDI_LEASE_TIMEOUT_MS
 
 static const unsigned char heartbeat_message[]={0xf0,0x7d,0x4e,0x53,0x36,0x48,0xf7};
 
@@ -23,15 +26,94 @@ static volatile sig_atomic_t running=1;
 static int socket_fd=-1;
 static struct sockaddr_in driver_address;
 static _Atomic uint64_t last_heartbeat_ms;
+static _Atomic uint64_t last_client_activity_ms;
+static _Atomic uint64_t last_client_lease_message_ms;
+static atomic_bool midi_client_active;
+static AudioDeviceID held_audio_device=kAudioObjectUnknown;
+static AudioDeviceIOProcID held_audio_proc;
+static uint64_t next_audio_check_ms;
 
+static void blackout_controller(void);
 static void stop(int signal_number){(void)signal_number;running=0;}
 static uint64_t monotonic_ms(void){struct timespec now;clock_gettime(CLOCK_MONOTONIC,&now);return (uint64_t)now.tv_sec*1000+(uint64_t)now.tv_nsec/1000000;}
+static OSStatus silent_audio(AudioDeviceID device,const AudioTimeStamp *now,const AudioBufferList *input,const AudioTimeStamp *input_time,AudioBufferList *output,const AudioTimeStamp *output_time,void *context){
+    (void)device;(void)now;(void)input;(void)input_time;(void)output_time;(void)context;
+    if(output)for(UInt32 i=0;i<output->mNumberBuffers;++i)
+        if(output->mBuffers[i].mData)memset(output->mBuffers[i].mData,0,output->mBuffers[i].mDataByteSize);
+    return noErr;
+}
+static void release_audio_session(void){
+    if(held_audio_proc){
+        AudioDeviceStop(held_audio_device,held_audio_proc);
+        AudioDeviceDestroyIOProcID(held_audio_device,held_audio_proc);
+        os_log(OS_LOG_DEFAULT,"Numark NS6 bridge silent audio session released");
+    }
+    held_audio_proc=NULL;held_audio_device=kAudioObjectUnknown;
+}
+static void maintain_audio_session(void){
+    uint64_t now=monotonic_ms();
+    if(now<next_audio_check_ms)return;
+    next_audio_check_ms=now+(held_audio_proc?1000:250);
+    CFStringRef uid=CFSTR("io.github.maurojuniorr.numark-ns6.device");
+    AudioDeviceID device=kAudioObjectUnknown;
+    UInt32 size=sizeof(device);
+    AudioObjectPropertyAddress property={kAudioHardwarePropertyTranslateUIDToDevice,kAudioObjectPropertyScopeGlobal,kAudioObjectPropertyElementMain};
+    OSStatus status=AudioObjectGetPropertyData(kAudioObjectSystemObject,&property,sizeof(uid),&uid,&size,&device);
+    if(status||device==kAudioObjectUnknown){release_audio_session();return;}
+    if(held_audio_proc&&device!=held_audio_device)release_audio_session();
+    UInt32 alive=0,active=0;
+    property.mSelector=kAudioDevicePropertyDeviceIsAlive;size=sizeof(alive);
+    if(AudioObjectGetPropertyData(device,&property,0,NULL,&size,&alive)||!alive){release_audio_session();return;}
+    property.mSelector=kAudioDevicePropertyDeviceIsRunningSomewhere;size=sizeof(active);
+    if(AudioObjectGetPropertyData(device,&property,0,NULL,&size,&active))return;
+    if(held_audio_proc){if(!active)release_audio_session();return;}
+    /* Start as soon as the device is alive so reconnects do not wait for an app. */
+    AudioDeviceIOProcID proc=NULL;
+    status=AudioDeviceCreateIOProcID(device,silent_audio,NULL,&proc);
+    if(!status){
+        status=AudioDeviceStart(device,proc);
+        if(status)AudioDeviceDestroyIOProcID(device,proc);
+    }
+    if(status){
+        next_audio_check_ms=now+5000;
+        os_log_error(OS_LOG_DEFAULT,"Numark NS6 bridge silent audio session failed: %d",(int)status);
+        return;
+    }
+    held_audio_device=device;held_audio_proc=proc;
+    os_log(OS_LOG_DEFAULT,"Numark NS6 bridge silent audio session started for connected device");
+}
 static bool is_heartbeat(const unsigned char *data,size_t length){return length==sizeof(heartbeat_message)&&memcmp(data,heartbeat_message,sizeof(heartbeat_message))==0;}
 static unsigned midi_length(unsigned char status){
     switch(status&0xf0){case 0x80:case 0x90:case 0xa0:case 0xb0:case 0xe0:return 3;case 0xc0:case 0xd0:return 2;default:return 0;}
 }
 static void send_to_driver(const unsigned char *data,size_t length){
     if(socket_fd>=0&&length)sendto(socket_fd,data,length,0,(const struct sockaddr *)&driver_address,sizeof(driver_address));
+}
+static void send_client_lease(bool active){
+    const unsigned char message[NS6_MIDI_LEASE_MESSAGE_BYTES]={'N','S','6','L',active?1:0};
+    send_to_driver(message,sizeof(message));
+    atomic_store(&last_client_lease_message_ms,monotonic_ms());
+}
+static void set_client_active(bool active){
+    if(atomic_exchange(&midi_client_active,active)==active)return;
+    send_client_lease(active);
+}
+static void observe_client_activity(void){
+    uint64_t now=monotonic_ms();
+    atomic_store(&last_client_activity_ms,now);
+    set_client_active(true);
+    uint64_t last=atomic_load(&last_client_lease_message_ms);
+    if(now>=last&&now-last>=500&&atomic_load(&midi_client_active))send_client_lease(true);
+}
+static void expire_client_lease(void){
+    uint64_t now=monotonic_ms(),last=atomic_load(&last_client_activity_ms);
+    if(!ns6_midi_lease_expired(atomic_load(&midi_client_active),last,now,NS6_MIDI_LEASE_TIMEOUT_MS))return;
+    set_client_active(false);
+    uint64_t heartbeat=atomic_load(&last_heartbeat_ms);
+    if(heartbeat&&now>=heartbeat&&now-heartbeat>=HEARTBEAT_TIMEOUT_MS){
+        blackout_controller();
+        atomic_store(&last_heartbeat_ms,0);
+    }
 }
 static void blackout_controller(void){
     unsigned char report[39];
@@ -44,6 +126,7 @@ static void blackout_controller(void){
 }
 static void receive_from_application(const MIDIPacketList *list,void *reference,void *connection){
     (void)reference;(void)connection;
+    if(list&&list->numPackets)observe_client_activity();
     unsigned char report[41];
     size_t used=0;
     const MIDIPacket *packet=list->packet;
@@ -106,19 +189,19 @@ int main(void){
     MIDIObjectSetIntegerProperty(destination,kMIDIPropertyUniqueID,0x4e533602);
     fprintf(stderr,"Numark NS6 MIDI Bridge ready\n");
     while(running){
+        maintain_audio_session();
         unsigned char data[64];ssize_t length=recv(socket_fd,data,sizeof(data),0);
         if(length<=0){
-            uint64_t heartbeat=atomic_load(&last_heartbeat_ms);
-            if(heartbeat&&monotonic_ms()-heartbeat>HEARTBEAT_TIMEOUT_MS){
-                blackout_controller();
-                atomic_store(&last_heartbeat_ms,0);
-            }
+            expire_client_lease();
             continue;
         }
         unsigned char storage[128];MIDIPacketList *list=(MIDIPacketList *)storage;
         MIDIPacket *packet=MIDIPacketListInit(list);
         if(MIDIPacketListAdd(list,sizeof(storage),packet,0,(UInt16)length,data))MIDIReceived(source,list);
+        expire_client_lease();
     }
+    set_client_active(false);
+    release_audio_session();
     MIDIEndpointDispose(destination);MIDIEndpointDispose(source);MIDIClientDispose(client);close(socket_fd);
     return 0;
 }

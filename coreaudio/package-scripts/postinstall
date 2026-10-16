@@ -6,3 +6,5 @@ set -eu
 /usr/bin/killall NumarkNS6Status >/dev/null 2>&1 || true
 /usr/bin/killall -m '^Core Audio Driver \(NumarkNS6M1\.driver\)$' >/dev/null 2>&1 || true
 /usr/bin/killall coreaudiod >/dev/null 2>&1 || true
+# LaunchAgent KeepAlive reloads the newly installed bridge binary.
+/usr/bin/killall NumarkNS6MIDIBridge >/dev/null 2>&1 || true

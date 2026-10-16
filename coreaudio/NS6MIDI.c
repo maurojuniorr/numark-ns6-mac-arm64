@@ -1,6 +1,7 @@
 #include "NS6MIDI.h"
 #include "NS6MIDIParser.h"
 #include "NS6MIDIRecovery.h"
+#include "NS6MIDILease.h"
 #include "NS6USBConfig.h"
 #include <arpa/inet.h>
 #include <IOKit/usb/USB.h>
@@ -18,14 +19,15 @@
 
 #define MIDI_PACKET_BYTES 42
 #define MIDI_IDLE_BYTE 0xfd
-#define MIDI_TERMINATOR 0x00
-#define MIDI_READ_SLOTS 4
+/* Ploytec retains 0xE0 in the OUT control byte; IN reports use a separate trailer. */
+#define MIDI_OUTPUT_CONTROL 0xe0
+#define MIDI_READ_SLOTS NS6_MIDI_RECOVERY_SLOTS
 #define MIDI_WRITE_QUEUE 1024
 #define MIDI_SOCKET_BUFFER (1024 * 1024)
 #define DRIVER_PORT 48238
 #define BRIDGE_PORT 48239
 
-struct read_slot { unsigned char data[MIDI_PACKET_BYTES]; };
+struct read_slot { unsigned char data[MIDI_PACKET_BYTES]; atomic_uint_fast64_t submitted_ms; };
 struct write_packet { unsigned char data[MIDI_PACKET_BYTES]; };
 static IOUSBInterfaceInterface **usb;
 static UInt8 input_pipe,output_pipe;
@@ -40,6 +42,7 @@ static struct write_packet queue[MIDI_WRITE_QUEUE];
 static unsigned head,tail;
 static uint32_t pending_read_recovery_mask;
 static uint32_t pending_read_clear_mask;
+static uint32_t in_flight_read_mask;
 static pthread_mutex_t queue_lock=PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t pipe_recovery_lock=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t queue_ready=PTHREAD_COND_INITIALIZER;
@@ -48,16 +51,31 @@ static bool writer_started,receiver_started;
 static int inbound_socket=-1,outbound_socket=-1;
 static struct sockaddr_in bridge_address;
 static atomic_bool running;
-static atomic_uint_fast64_t last_input_error_log_ms;
+static atomic_bool input_polling;
+static atomic_bool client_active;
+static atomic_uint_fast64_t last_client_active_ms;
+static pthread_mutex_t input_state_lock=PTHREAD_MUTEX_INITIALIZER;
+/* Separate throttles preserve the first error of each class and slot. */
+static atomic_uint_fast64_t last_input_error_log_ms[MIDI_READ_SLOTS+1][4];
+static atomic_uint input_error_counts[4];
+static atomic_uint_fast64_t last_input_success_ms;
+static atomic_uint_fast64_t input_success_count;
+static atomic_uint input_clear_epoch;
+static atomic_bool input_clear_active;
+static bool submit_read(struct read_slot *slot);
 
 static uint64_t monotonic_ms(void){struct timespec now;clock_gettime(CLOCK_MONOTONIC,&now);return (uint64_t)now.tv_sec*1000+(uint64_t)now.tv_nsec/1000000;}
 static bool recover_stalled_pipe(UInt8 pipe,const char *direction){
     if(!usb||!pipe||!atomic_load(&running))return false;
     pthread_mutex_lock(&pipe_recovery_lock);
+    bool input=pipe==input_pipe;
+    unsigned epoch=atomic_load(&input_clear_epoch);
+    if(input){epoch=atomic_fetch_add(&input_clear_epoch,1)+1;atomic_store(&input_clear_active,true);}
     IOReturn result=(*usb)->ClearPipeStallBothEnds(usb,pipe);
+    if(input)atomic_store(&input_clear_active,false);
     pthread_mutex_unlock(&pipe_recovery_lock);
     if(result==kIOReturnSuccess){
-        os_log(OS_LOG_DEFAULT,"Numark NS6 MIDI %{public}s pipe stall cleared",direction);
+        os_log(OS_LOG_DEFAULT,"Numark NS6 MIDI %{public}s pipe stall cleared; input epoch %{public}u",direction,epoch);
         return true;
     }
     os_log_error(OS_LOG_DEFAULT,"Numark NS6 MIDI %{public}s pipe stall recovery failed: %{public}u",direction,(unsigned)result);
@@ -73,10 +91,39 @@ static void schedule_read_recovery(struct read_slot *slot,bool clear_stall){
     pthread_cond_signal(&queue_ready);
     pthread_mutex_unlock(&queue_lock);
 }
-static void log_input_error(IOReturn result,const char *stage){
-    uint64_t now=monotonic_ms(),last=atomic_load(&last_input_error_log_ms);
-    if(now-last>=1000&&atomic_compare_exchange_strong(&last_input_error_log_ms,&last,now))
-        os_log_error(OS_LOG_DEFAULT,"Numark NS6 MIDI input %{public}s failed: %{public}u",stage,(unsigned)result);
+static void log_input_error(IOReturn result,const char *stage,struct read_slot *slot){
+    unsigned index=slot?(unsigned)(slot-reads):MIDI_READ_SLOTS;
+    unsigned kind=result==kIOReturnNotResponding?0:result==kIOReturnAborted?1:result==kIOUSBPipeStalled?2:3;
+    unsigned count=atomic_fetch_add(&input_error_counts[kind],1)+1;
+    uint64_t submitted=slot?atomic_load(&slot->submitted_ms):0;
+    uint64_t success=atomic_load(&last_input_success_ms);
+    uint64_t now=monotonic_ms(),last=atomic_load(&last_input_error_log_ms[index][kind]);
+    if(now-last>=1000&&atomic_compare_exchange_strong(&last_input_error_log_ms[index][kind],&last,now))
+        os_log_error(OS_LOG_DEFAULT,"Numark NS6 MIDI input %{public}s failed: 0x%{public}08x; slot %{public}u; class total %{public}u; clear epoch %{public}u; clear active %{public}d; read age %{public}llu ms; last success age %{public}llu ms; success count %{public}llu",stage,(unsigned)result,index,count,atomic_load(&input_clear_epoch),atomic_load(&input_clear_active),(unsigned long long)(submitted?now-submitted:0),(unsigned long long)(success?now-success:0),(unsigned long long)atomic_load(&input_success_count));
+}
+static void refresh_input_polling(void){
+    pthread_mutex_lock(&input_state_lock);
+    bool desired=ns6_midi_should_poll(ns6_usb_midi_input_enabled(),atomic_load_explicit(&running,memory_order_acquire));
+    bool current=atomic_load_explicit(&input_polling,memory_order_acquire);
+    if(desired!=current){
+        if(desired){
+            IOReturn result=(*usb)->ClearPipeStallBothEnds(usb,input_pipe);
+            if(result==kIOReturnSuccess){
+                atomic_store_explicit(&input_polling,true,memory_order_release);
+                for(unsigned i=0;i<MIDI_READ_SLOTS;++i)submit_read(&reads[i]);
+                os_log(OS_LOG_DEFAULT,"Numark NS6 MIDI input polling resumed for an active USB session");
+            }else log_input_error(result,"session resume",NULL);
+        }else{
+            atomic_store_explicit(&input_polling,false,memory_order_release);
+            IOReturn result=(*usb)->AbortPipe(usb,input_pipe);
+            os_log(OS_LOG_DEFAULT,"Numark NS6 MIDI input polling suspended because the USB session stopped (abort status 0x%08x)",(unsigned)result);
+        }
+    }
+    pthread_mutex_unlock(&input_state_lock);
+}
+static void set_client_active(bool active){
+    atomic_store_explicit(&client_active,active,memory_order_release);
+    refresh_input_polling();
 }
 
 static bool find_pipes(void){
@@ -87,7 +134,7 @@ static bool find_pipes(void){
 static void enqueue(const unsigned char *data,unsigned length){
     if(!length||length>=MIDI_PACKET_BYTES)return;
     pthread_mutex_lock(&queue_lock);unsigned next=(tail+1)%MIDI_WRITE_QUEUE;
-    if(next!=head){memset(queue[tail].data,MIDI_IDLE_BYTE,MIDI_PACKET_BYTES);memcpy(queue[tail].data,data,length);queue[tail].data[MIDI_PACKET_BYTES-1]=MIDI_TERMINATOR;tail=next;pthread_cond_signal(&queue_ready);}pthread_mutex_unlock(&queue_lock);
+    if(next!=head){memset(queue[tail].data,MIDI_IDLE_BYTE,MIDI_PACKET_BYTES);memcpy(queue[tail].data,data,length);queue[tail].data[MIDI_PACKET_BYTES-1]=MIDI_OUTPUT_CONTROL;tail=next;pthread_cond_signal(&queue_ready);}pthread_mutex_unlock(&queue_lock);
 }
 static void forward_to_bridge(const unsigned char *data,unsigned length){if(outbound_socket>=0)sendto(outbound_socket,data,length,0,(const struct sockaddr *)&bridge_address,sizeof(bridge_address));}
 static void inspect_handshake_reply(const unsigned char *data,UInt32 length){
@@ -126,22 +173,36 @@ static void publish_packet(const unsigned char *data,UInt32 length){
     if(used)forward_to_bridge(messages,(unsigned)used);
     pthread_mutex_unlock(&parser_lock);
 }
-static bool submit_read(struct read_slot *slot);
 static void read_complete(void *reference,IOReturn status,void *argument){
     struct read_slot *slot=reference;
-    if(status==kIOReturnSuccess){UInt32 length=(UInt32)(uintptr_t)argument;if(length>MIDI_PACKET_BYTES)length=MIDI_PACKET_BYTES;publish_packet(slot->data,length);}
+    pthread_mutex_lock(&queue_lock);
+    in_flight_read_mask&=~(UINT32_C(1)<<(unsigned)(slot-reads));
+    pthread_cond_signal(&queue_ready);
+    pthread_mutex_unlock(&queue_lock);
+    if(status==kIOReturnSuccess){atomic_store(&last_input_success_ms,monotonic_ms());atomic_fetch_add(&input_success_count,1);if(atomic_load_explicit(&input_polling,memory_order_acquire)){UInt32 length=(UInt32)(uintptr_t)argument;if(length>MIDI_PACKET_BYTES)length=MIDI_PACKET_BYTES;publish_packet(slot->data,length);}}
     else if(atomic_load(&running)){
-        log_input_error(status,"completion");
+        if(!atomic_load_explicit(&input_polling,memory_order_acquire))return;
+        log_input_error(status,"completion",slot);
         schedule_read_recovery(slot,status==kIOUSBPipeStalled);
         return;
     }
-    if(atomic_load(&running))submit_read(slot);
+    if(atomic_load(&running)&&atomic_load_explicit(&input_polling,memory_order_acquire))submit_read(slot);
 }
 static bool submit_read(struct read_slot *slot){
-    if(!atomic_load(&running))return false;
+    if(!atomic_load(&running)||!atomic_load_explicit(&input_polling,memory_order_acquire))return false;
+    uint32_t bit=UINT32_C(1)<<(unsigned)(slot-reads);
+    pthread_mutex_lock(&queue_lock);
+    if(in_flight_read_mask&bit){pthread_mutex_unlock(&queue_lock);return false;}
+    in_flight_read_mask|=bit;
+    pthread_mutex_unlock(&queue_lock);
+    atomic_store(&slot->submitted_ms,monotonic_ms());
     IOReturn result=(*usb)->ReadPipeAsync(usb,input_pipe,slot->data,sizeof(slot->data),read_complete,slot);
     if(result==kIOReturnSuccess)return true;
-    log_input_error(result,"submission");
+    pthread_mutex_lock(&queue_lock);
+    in_flight_read_mask&=~bit;
+    pthread_cond_signal(&queue_ready);
+    pthread_mutex_unlock(&queue_lock);
+    log_input_error(result,"submission",slot);
     schedule_read_recovery(slot,result==kIOUSBPipeStalled);
     return false;
 }
@@ -161,6 +222,19 @@ static void *write_worker(void *unused){
             bool recovered=!(clear_mask&recovery_mask)||recover_stalled_pipe(input_pipe,"input");
             bool all_submitted=recovered;
             if(recovered){
+                if(clear_mask&recovery_mask){
+                    struct timespec deadline;
+                    clock_gettime(CLOCK_REALTIME,&deadline);
+                    deadline.tv_nsec+=250000000L;
+                    if(deadline.tv_nsec>=1000000000L){deadline.tv_sec++;deadline.tv_nsec-=1000000000L;}
+                    pthread_mutex_lock(&queue_lock);
+                    while(in_flight_read_mask&&atomic_load(&running)&&pthread_cond_timedwait(&queue_ready,&queue_lock,&deadline)==0){}
+                    recovery_mask|=ns6_midi_recovery_take(&pending_read_recovery_mask);
+                    recovery_mask=ns6_midi_recovery_ready(recovery_mask,in_flight_read_mask);
+                    /* This clear already covers the aborted reads that completed while waiting. */
+                    pending_read_clear_mask&=~recovery_mask;
+                    pthread_mutex_unlock(&queue_lock);
+                }
                 for(unsigned i=0;i<MIDI_READ_SLOTS;++i)
                     if((recovery_mask&(UINT32_C(1)<<i))&&!submit_read(&reads[i]))all_submitted=false;
             }else if(atomic_load(&running)){
@@ -192,17 +266,17 @@ static void blackout_controller(void){
         for(unsigned channel=0;channel<=4;++channel){
             for(unsigned cc=0;cc<=0x51;++cc){
                 packet[used++]=0xb0+channel;packet[used++]=cc;packet[used++]=0;
-                if(used==39){packet[41]=MIDI_TERMINATOR;(*usb)->WritePipe(usb,output_pipe,packet,sizeof(packet));nanosleep(&settle,NULL);memset(packet,MIDI_IDLE_BYTE,sizeof(packet));used=0;}
+                if(used==39){packet[41]=MIDI_OUTPUT_CONTROL;(*usb)->WritePipe(usb,output_pipe,packet,sizeof(packet));nanosleep(&settle,NULL);memset(packet,MIDI_IDLE_BYTE,sizeof(packet));used=0;}
             }
             for(unsigned note=0;note<=0x50;++note){
                 packet[used++]=0x80+channel;packet[used++]=note;packet[used++]=0;
-                if(used==39){packet[41]=MIDI_TERMINATOR;(*usb)->WritePipe(usb,output_pipe,packet,sizeof(packet));nanosleep(&settle,NULL);memset(packet,MIDI_IDLE_BYTE,sizeof(packet));used=0;}
+                if(used==39){packet[41]=MIDI_OUTPUT_CONTROL;(*usb)->WritePipe(usb,output_pipe,packet,sizeof(packet));nanosleep(&settle,NULL);memset(packet,MIDI_IDLE_BYTE,sizeof(packet));used=0;}
             }
         }
-        if(used){packet[41]=MIDI_TERMINATOR;(*usb)->WritePipe(usb,output_pipe,packet,sizeof(packet));nanosleep(&settle,NULL);}
+        if(used){packet[41]=MIDI_OUTPUT_CONTROL;(*usb)->WritePipe(usb,output_pipe,packet,sizeof(packet));nanosleep(&settle,NULL);}
     }
 }
-static void *receive_worker(void *unused){(void)unused;unsigned char data[41];while(atomic_load(&running)){ssize_t length=recv(inbound_socket,data,sizeof(data),0);if(length>0)enqueue(data,(unsigned)length);}return NULL;}
+static void *receive_worker(void *unused){(void)unused;unsigned char data[41];while(atomic_load(&running)){ssize_t length=recv(inbound_socket,data,sizeof(data),0);if(length<=0){uint64_t last=atomic_load(&last_client_active_ms),now=monotonic_ms();if(ns6_midi_lease_expired(atomic_load(&client_active),last,now,NS6_MIDI_LEASE_TIMEOUT_MS)){atomic_store(&last_client_active_ms,0);set_client_active(false);os_log(OS_LOG_DEFAULT,"Numark NS6 MIDI client lease expired; keeping USB input reads active for this session");}continue;}bool active=false;if(ns6_midi_lease_decode(data,(size_t)length,&active)){atomic_store(&last_client_active_ms,active?monotonic_ms():0);set_client_active(active);continue;}enqueue(data,(unsigned)length);}return NULL;}
 static bool open_sockets(void){
     inbound_socket=socket(AF_INET,SOCK_DGRAM,0);outbound_socket=socket(AF_INET,SOCK_DGRAM,0);if(inbound_socket<0||outbound_socket<0)return false;
     int reuse=1;setsockopt(inbound_socket,SOL_SOCKET,SO_REUSEADDR,&reuse,sizeof(reuse));setsockopt(inbound_socket,SOL_SOCKET,SO_RCVBUF,&(int){MIDI_SOCKET_BUFFER},sizeof(int));setsockopt(outbound_socket,SOL_SOCKET,SO_SNDBUF,&(int){MIDI_SOCKET_BUFFER},sizeof(int));struct sockaddr_in local={.sin_len=sizeof(local),.sin_family=AF_INET,.sin_port=htons(DRIVER_PORT),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
@@ -216,15 +290,16 @@ static void close_sockets(void){
 bool ns6_midi_start(IOUSBInterfaceInterface **new_usb,CFRunLoopRef run_loop){
     if(atomic_load(&running))return true;
     if(!new_usb||!run_loop)return false;
-    usb=new_usb;input_pipe=output_pipe=0;head=tail=0;pending_read_recovery_mask=pending_read_clear_mask=0;memset(&parser,0,sizeof(parser));writer_started=receiver_started=false;
+    usb=new_usb;input_pipe=output_pipe=0;head=tail=0;pending_read_recovery_mask=pending_read_clear_mask=in_flight_read_mask=0;memset(&parser,0,sizeof(parser));writer_started=receiver_started=false;
     if(!find_pipes()||(ns6_usb_midi_input_enabled()&&(*usb)->ClearPipeStallBothEnds(usb,input_pipe)!=kIOReturnSuccess)||(*usb)->ClearPipeStallBothEnds(usb,output_pipe)!=kIOReturnSuccess||!open_sockets()){close_sockets();usb=NULL;return false;}
-    atomic_store(&running,true);
+    atomic_store(&client_active,false);atomic_store(&last_client_active_ms,0);atomic_store(&input_polling,ns6_usb_midi_input_enabled());atomic_store(&running,true);
     if(pthread_create(&writer,NULL,write_worker,NULL)!=0){atomic_store(&running,false);close_sockets();usb=NULL;return false;}
     writer_started=true;
     if(ns6_usb_midi_input_enabled()){
         if(pthread_create(&receiver,NULL,receive_worker,NULL)!=0){ns6_midi_stop();return false;}
         receiver_started=true;
         for(unsigned i=0;i<MIDI_READ_SLOTS;++i)submit_read(&reads[i]);
+        os_log(OS_LOG_DEFAULT,"Numark NS6 MIDI input reads queued: %u slots",(unsigned)MIDI_READ_SLOTS);
     }else{
         os_log(OS_LOG_DEFAULT,"Numark NS6 diagnostic mode: MIDI input polling disabled; outbound activation sequence remains enabled");
     }
@@ -260,14 +335,15 @@ bool ns6_midi_handshake(CFRunLoopRef loop){
     pump_until(loop,started+796);
     enqueue(wake,sizeof(wake));
     pthread_mutex_lock(&handshake_lock);handshake_capture=false;handshake_sysex_active=false;pthread_mutex_unlock(&handshake_lock);
+    refresh_input_polling();
     os_log(OS_LOG_DEFAULT,"Numark NS6 host-identify handshake completed; device reply %{public}s",received?"observed":"not observed");
     return received;
 }
 static void stop_midi(bool blackout){
     bool was_running=atomic_exchange(&running,false);
     if(!was_running&&!writer_started&&!receiver_started){close_sockets();usb=NULL;return;}
+    refresh_input_polling();
     pthread_mutex_lock(&queue_lock);pthread_cond_broadcast(&queue_ready);pthread_mutex_unlock(&queue_lock);
-    if(usb&&input_pipe)(*usb)->AbortPipe(usb,input_pipe);
     if(inbound_socket>=0){close(inbound_socket);inbound_socket=-1;}
     if(writer_started){pthread_join(writer,NULL);writer_started=false;}
     /* The HAL still owns the USB interface here. Do the blackout before the

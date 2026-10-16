@@ -10,7 +10,11 @@ int main(void) {
     assert(pending == 5u);
     assert(ns6_midi_recovery_take(&pending) == 5u);
     assert(pending == 0u);
-    assert(ns6_midi_recovery_add(0, 4) == 0u);
+    assert(ns6_midi_recovery_add(0, NS6_MIDI_RECOVERY_SLOTS - 1) ==
+           (UINT32_C(1) << (NS6_MIDI_RECOVERY_SLOTS - 1)));
+    assert(ns6_midi_recovery_add(0, NS6_MIDI_RECOVERY_SLOTS) == 0u);
+    assert(ns6_midi_recovery_ready(5u, 0u) == 5u);
+    assert(ns6_midi_recovery_ready(5u, 4u) == 1u);
     assert(ns6_midi_recovery_backoff_ms(0) == 0u);
     assert(ns6_midi_recovery_backoff_ms(1) == 50u);
     assert(ns6_midi_recovery_backoff_ms(2) == 100u);

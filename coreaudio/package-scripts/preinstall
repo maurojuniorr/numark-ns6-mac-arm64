@@ -1,7 +1,6 @@
 #!/bin/zsh
 set -eu
 
-# Remove old app copies before installing the current bundle at the standard path.
-/bin/rm -rf "/Applications/Numark NS6 Status.app"
+# Remove only the legacy copy; Installer atomically replaces the standard app bundle.
 /bin/rm -rf "/Applications/Numark NS6 Status.localized/Numark NS6 Status.app"
 exit 0

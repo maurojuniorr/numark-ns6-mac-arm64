@@ -4,10 +4,10 @@
 #include "NS6ZeroTimestamp.h"
 #include "NS6ActiveFlow.h"
 #include "NS6IOMetrics.h"
+#include "NS6AudioTransportPolicy.h"
 #include <CoreAudio/AudioHardware.h>
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <CoreFoundation/CFPlugInCOM.h>
-#include <CoreAudio/CoreAudio.h>
 #include <IOKit/IOKitLib.h>
 #include <IOKit/usb/IOUSBLib.h>
 #include <mach/mach_time.h>
@@ -57,7 +57,6 @@ static atomic_bool device_present;
 static atomic_uint enqueue_failures;
 static atomic_uint_fast64_t last_enqueue_log_ms;
 static pthread_once_t usb_monitor_once=PTHREAD_ONCE_INIT;
-static pthread_once_t default_output_monitor_once=PTHREAD_ONCE_INIT;
 static pthread_once_t io_metrics_once=PTHREAD_ONCE_INIT;
 static pthread_mutex_t stream_lock=PTHREAD_MUTEX_INITIALIZER;
 static bool transport_open;
@@ -96,50 +95,6 @@ static void publish_connection_state(void){
 static void usb_changed(void *reference,io_iterator_t iterator){(void)reference;io_service_t service;while((service=IOIteratorNext(iterator)))IOObjectRelease(service);publish_connection_state();}
 static void *usb_monitor_thread(void *unused){(void)unused;usb_notifications=IONotificationPortCreate(kIOMainPortDefault);if(!usb_notifications)return NULL;CFRunLoopAddSource(CFRunLoopGetCurrent(),IONotificationPortGetRunLoopSource(usb_notifications),kCFRunLoopDefaultMode);if(IOServiceAddMatchingNotification(usb_notifications,kIOFirstMatchNotification,IOServiceMatching("IOUSBHostDevice"),usb_changed,NULL,&usb_added)==KERN_SUCCESS)usb_changed(NULL,usb_added);if(IOServiceAddMatchingNotification(usb_notifications,kIOTerminatedNotification,IOServiceMatching("IOUSBHostDevice"),usb_changed,NULL,&usb_removed)==KERN_SUCCESS)usb_changed(NULL,usb_removed);CFRunLoopRun();return NULL;}
 static void monitor_usb(void){pthread_t thread;if(pthread_create(&thread,NULL,usb_monitor_thread,NULL)==0)pthread_detach(thread);}
-static bool ns6_is_default_output(void){
-    AudioObjectPropertyAddress address={kAudioHardwarePropertyDefaultOutputDevice,kAudioObjectPropertyScopeGlobal,kAudioObjectPropertyElementMain};
-    AudioDeviceID device=0;UInt32 size=sizeof(device);
-    if(AudioObjectGetPropertyData(kAudioObjectSystemObject,&address,0,NULL,&size,&device)!=noErr||!device)return false;
-    address.mSelector=kAudioDevicePropertyDeviceUID;CFStringRef uid=NULL;size=sizeof(uid);
-    if(AudioObjectGetPropertyData(device,&address,0,NULL,&size,&uid)!=noErr||!uid)return false;
-    bool selected=CFStringCompare(uid,CFSTR("io.github.maurojuniorr.numark-ns6.device"),0)==kCFCompareEqualTo;
-    CFRelease(uid);return selected;
-}
-static void *default_output_monitor_thread(void *unused){
-    (void)unused;const struct timespec delay={0,500000000};
-    bool previous_selected=false,first_check=true;
-    for(;;){
-        bool selected=atomic_load_explicit(&device_present,memory_order_acquire)&&ns6_is_default_output();
-        pthread_mutex_lock(&stream_lock);
-        if(first_check||selected!=previous_selected){
-            os_log(OS_LOG_DEFAULT,"Numark NS6 default output route: %{public}s (USB present: %{public}s)",selected?"selected":"not selected",atomic_load_explicit(&device_present,memory_order_acquire)?"yes":"no");
-            first_check=false;previous_selected=selected;
-        }
-        unsigned clients=atomic_load_explicit(&io_clients,memory_order_acquire);
-        bool present=atomic_load_explicit(&device_present,memory_order_acquire);
-        if(present&&!transport_open){
-            if(ns6_usb_start()){
-                transport_open=true;
-                bool paused=clients==0;
-                ns6_usb_set_paused(paused);
-                os_log(OS_LOG_DEFAULT,"Numark NS6 USB audio clock started (%{public}s; default output: %{public}s)",paused?"silent standby":"active audio",selected?"yes":"no");
-            }else os_log_error(OS_LOG_DEFAULT,"Numark NS6 USB audio standby initialization failed (default output: %{public}s)",selected?"yes":"no");
-        }else if(transport_open){
-            /* Keep the isochronous clock alive across route changes. Tearing
-               down here joins the USB worker (including synchronous MIDI
-               shutdown writes) while holding stream_lock; if IOKit stalls,
-               the route monitor cannot observe the next selection and
-               StartIO cannot resume the device. */
-            bool paused=clients==0;
-            ns6_usb_set_paused(paused);
-        }
-        pthread_mutex_unlock(&stream_lock);
-        nanosleep(&delay,NULL);
-    }
-    return NULL;
-}
-static void monitor_default_output_once(void){pthread_t thread;if(pthread_create(&thread,NULL,default_output_monitor_thread,NULL)==0)pthread_detach(thread);}
-static void monitor_default_output(void){pthread_once(&default_output_monitor_once,monitor_default_output_once);}
 
 void *NS6_Create(CFAllocatorRef allocator,CFUUIDRef type){(void)allocator;return CFEqual(type,kAudioServerPlugInTypeUUID)?driver:NULL;}
 static bool valid_object(AudioObjectID object){return object==kAudioObjectPlugInObject||object==DEVICE_ID||object==STREAM_ID;}
@@ -147,7 +102,7 @@ static bool supported_buffer_size(UInt32 frames);
 static void *restart_usb_for_buffer(void *unused);
 static HRESULT query_interface(void *value,REFIID uuid,LPVOID *out){if(value!=driver||!out)return E_NOINTERFACE;CFUUIDRef requested=CFUUIDCreateFromUUIDBytes(NULL,uuid);HRESULT result=E_NOINTERFACE;if(requested&&(CFEqual(requested,IUnknownUUID)||CFEqual(requested,kAudioServerPlugInDriverInterfaceUUID))){*out=driver;++references;result=0;}if(requested)CFRelease(requested);return result;}
 static ULONG add_ref(void *value){return value==driver?++references:0;} static ULONG release_ref(void *value){return value==driver&&references?--references:0;}
-static OSStatus initialize(AudioServerPlugInDriverRef value,AudioServerPlugInHostRef value_host){if(value!=driver)return kAudioHardwareBadObjectError;host=value_host;mach_timebase_info(&timebase);if(host->CopyFromStorage){CFPropertyListRef stored=NULL;if(host->CopyFromStorage(host,NS6_DRIVER_BUFFER_STORAGE_KEY,&stored)==noErr&&stored&&CFGetTypeID(stored)==CFNumberGetTypeID()){SInt32 frames=0;if(CFNumberGetValue((CFNumberRef)stored,kCFNumberSInt32Type,&frames)&&frames>0&&supported_buffer_size((UInt32)frames)){atomic_store(&driver_buffer_frames,(UInt32)frames);ns6_usb_set_startup_buffer_frames((UInt32)frames);}}if(stored)CFRelease(stored);}atomic_store(&device_present,ns6_connected());pthread_once(&usb_monitor_once,monitor_usb);monitor_default_output();return 0;}
+static OSStatus initialize(AudioServerPlugInDriverRef value,AudioServerPlugInHostRef value_host){if(value!=driver)return kAudioHardwareBadObjectError;host=value_host;mach_timebase_info(&timebase);if(host->CopyFromStorage){CFPropertyListRef stored=NULL;if(host->CopyFromStorage(host,NS6_DRIVER_BUFFER_STORAGE_KEY,&stored)==noErr&&stored&&CFGetTypeID(stored)==CFNumberGetTypeID()){SInt32 frames=0;if(CFNumberGetValue((CFNumberRef)stored,kCFNumberSInt32Type,&frames)&&frames>0&&supported_buffer_size((UInt32)frames)){atomic_store(&driver_buffer_frames,(UInt32)frames);ns6_usb_set_startup_buffer_frames((UInt32)frames);}}if(stored)CFRelease(stored);}atomic_store(&device_present,ns6_connected());pthread_once(&usb_monitor_once,monitor_usb);return 0;}
 static OSStatus create_device(AudioServerPlugInDriverRef d,CFDictionaryRef x,const AudioServerPlugInClientInfo*y,AudioObjectID*z){(void)d;(void)x;(void)y;(void)z;return kAudioHardwareUnsupportedOperationError;} static OSStatus destroy_device(AudioServerPlugInDriverRef d,AudioObjectID x){(void)d;(void)x;return kAudioHardwareUnsupportedOperationError;}
 static NS6TrackedClient *find_client_locked(UInt32 client_id){for(size_t n=0;n<NS6_TRACKED_CLIENTS;++n)if(tracked_clients[n].used&&tracked_clients[n].client_id==client_id)return &tracked_clients[n];return NULL;}
 static void refresh_client_identity_locked(void){NS6TrackedClient *latest=NULL;for(size_t n=0;n<NS6_TRACKED_CLIENTS;++n)if(tracked_clients[n].used&&tracked_clients[n].starts&&(!latest||tracked_clients[n].order>latest->order))latest=&tracked_clients[n];if(latest)os_log(OS_LOG_DEFAULT,"Numark NS6 active CoreAudio client: %{public}s pid=%d",latest->bundle_id,latest->pid);}
@@ -246,7 +201,7 @@ static OSStatus start_io(AudioServerPlugInDriverRef d,AudioObjectID object,UInt3
     if(!atomic_load(&device_present)){os_log_error(OS_LOG_DEFAULT,"Numark NS6 start_io refused: USB device absent");return kAudioHardwareNotRunningError;}
     pthread_mutex_lock(&stream_lock);
     unsigned clients=atomic_load_explicit(&io_clients,memory_order_acquire);
-    if(!transport_open&&!ns6_usb_start()){pthread_mutex_unlock(&stream_lock);os_log_error(OS_LOG_DEFAULT,"Numark NS6 start_io failed: USB transport initialization failed");return kAudioHardwareUnspecifiedError;}
+    if(ns6_audio_transport_action(transport_open,clients+1)==NS6_AUDIO_TRANSPORT_START&&!ns6_usb_start()){pthread_mutex_unlock(&stream_lock);os_log_error(OS_LOG_DEFAULT,"Numark NS6 start_io failed: USB transport initialization failed");return kAudioHardwareUnspecifiedError;}
     NS6TrackedClient *active_client=find_client_locked(client);
     if(active_client){++active_client->starts;active_client->order=++client_order;refresh_client_identity_locked();}
     transport_open=true;
@@ -274,7 +229,9 @@ static OSStatus stop_io(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32
         if(!clients){
             ns6_active_flow_clear(&active_flow);
             ns6_usb_set_paused(true);ns6_transport_discard();
-            os_log(OS_LOG_DEFAULT,"Numark NS6 audio paused; keeping USB clock active with silence (client %u)",client);
+            os_log(OS_LOG_DEFAULT,"Numark NS6 audio idle; USB transport retained with silence (client %u)",client);
+        }else{
+            os_log(OS_LOG_DEFAULT,"Numark NS6 audio client stopped; USB transport retained (%u clients remain)",clients);
         }
     }
     refresh_client_identity_locked();

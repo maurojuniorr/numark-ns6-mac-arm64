@@ -3,7 +3,11 @@
 
 #include <stdint.h>
 
+#ifndef NS6_MIDI_RECOVERY_SLOTS
 #define NS6_MIDI_RECOVERY_SLOTS 4u
+#endif
+_Static_assert(NS6_MIDI_RECOVERY_SLOTS > 0 && NS6_MIDI_RECOVERY_SLOTS <= 32,
+               "MIDI recovery mask supports 1 to 32 slots");
 
 static inline uint32_t ns6_midi_recovery_add(uint32_t pending, unsigned slot) {
     return slot < NS6_MIDI_RECOVERY_SLOTS ? pending | (UINT32_C(1) << slot) : pending;
@@ -14,6 +18,10 @@ static inline uint32_t ns6_midi_recovery_take(uint32_t *pending) {
     uint32_t ready = *pending;
     *pending = 0;
     return ready;
+}
+
+static inline uint32_t ns6_midi_recovery_ready(uint32_t completed, uint32_t in_flight) {
+    return completed & ~in_flight;
 }
 
 static inline uint32_t ns6_midi_recovery_backoff_ms(unsigned attempt) {

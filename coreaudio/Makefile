@@ -5,11 +5,12 @@ NS6_ADAPTIVE_CLOCK_MIN_OUTPUT_RATE_MILLIHZ ?= 44000000
 NS6_MIDI_ENABLED ?= 1
 NS6_FEEDBACK_READER_ENABLED ?= 1
 NS6_USB_OUTPUT_SLOT_COUNT ?= 8
+NS6_MIDI_READ_SLOTS ?= 4
 DRIVER_OPT_FLAGS ?= -O2
-CFLAGS := -Wall -Wextra -Werror -arch arm64 -isysroot $(SDK) -mmacosx-version-min=15.0 -fPIC -DNS6_ADAPTIVE_CLOCK_ENABLED=$(ADAPTIVE_CLOCK) -DNS6_FEEDBACK_PATTERN_SCHEDULER_ENABLED=$(NS6_FEEDBACK_PATTERN_SCHEDULER) -DNS6_ADAPTIVE_CLOCK_MIN_OUTPUT_RATE_MILLIHZ=$(NS6_ADAPTIVE_CLOCK_MIN_OUTPUT_RATE_MILLIHZ) -DNS6_MIDI_ENABLED=$(NS6_MIDI_ENABLED) -DNS6_FEEDBACK_READER_ENABLED=$(NS6_FEEDBACK_READER_ENABLED) -DNS6_USB_OUTPUT_SLOT_COUNT=$(NS6_USB_OUTPUT_SLOT_COUNT)
+CFLAGS := -Wall -Wextra -Werror -arch arm64 -isysroot $(SDK) -mmacosx-version-min=15.0 -fPIC -DNS6_ADAPTIVE_CLOCK_ENABLED=$(ADAPTIVE_CLOCK) -DNS6_FEEDBACK_PATTERN_SCHEDULER_ENABLED=$(NS6_FEEDBACK_PATTERN_SCHEDULER) -DNS6_ADAPTIVE_CLOCK_MIN_OUTPUT_RATE_MILLIHZ=$(NS6_ADAPTIVE_CLOCK_MIN_OUTPUT_RATE_MILLIHZ) -DNS6_MIDI_ENABLED=$(NS6_MIDI_ENABLED) -DNS6_FEEDBACK_READER_ENABLED=$(NS6_FEEDBACK_READER_ENABLED) -DNS6_USB_OUTPUT_SLOT_COUNT=$(NS6_USB_OUTPUT_SLOT_COUNT) -DNS6_MIDI_RECOVERY_SLOTS=$(NS6_MIDI_READ_SLOTS)
 BUILD := build/NumarkNS6.driver/Contents
 APP := build/NumarkNS6Status.app
-VERSION ?= 0.2.123
+VERSION ?= 0.2.138
 BUNDLE_BUILD_VERSION ?= $(shell echo $(VERSION) | awk -F. '{print $$3}')
 PACKAGE_ID := io.github.maurojuniorr.numark-ns6
 PACKAGE_ROOT := build/package-root
@@ -17,7 +18,7 @@ DIST := dist
 SWIFT_MODULE_CACHE := /tmp/ns6-macos-swift-module-cache
 FORCE:
 
-.PHONY: FORCE usb-work-interval-regression-test audio-recovery-test zero-timestamp-test
+.PHONY: FORCE usb-work-interval-regression-test audio-recovery-test zero-timestamp-test audio-transport-policy-test midi-lease-test
 
 firmware-version-test: NS6FirmwareVersionTest.c NS6FirmwareVersion.c NS6FirmwareVersion.h
 	$(CC) -Wall -Wextra -Werror NS6FirmwareVersionTest.c NS6FirmwareVersion.c -o build/ns6-firmware-version-test
@@ -27,9 +28,19 @@ active-flow-test: NS6ActiveFlowTest.c NS6ActiveFlow.h
 	$(CC) -std=c11 -Wall -Wextra -Werror NS6ActiveFlowTest.c -o build/ns6-active-flow-test
 	build/ns6-active-flow-test
 
+audio-transport-policy-test: NS6AudioTransportPolicyTest.c NS6AudioTransportPolicy.h
+	mkdir -p build
+	$(CC) -std=c11 -Wall -Wextra -Werror NS6AudioTransportPolicyTest.c -o build/ns6-audio-transport-policy-test
+	build/ns6-audio-transport-policy-test
+
+midi-lease-test: NS6MIDILeaseTest.c NS6MIDILease.h
+	mkdir -p build
+	$(CC) -std=c11 -Wall -Wextra -Werror NS6MIDILeaseTest.c -o build/ns6-midi-lease-test
+	build/ns6-midi-lease-test
+
 all: $(BUILD)/MacOS/NumarkNS6 $(BUILD)/Info.plist app midi-bridge
 
-$(BUILD)/MacOS/NumarkNS6: FORCE NS6HAL.c NS6Transport.c NS6USB.c NS6USBEndpoint.h NS6USBConfig.h NS6USBTiming.c NS6USBTiming.h NS6USBFrameTimestamps.h NS6USBWorkerQoS.h NS6ClockControl.c NS6ClockControl.h NS6MIDI.c NS6MIDIParser.h NS6MIDIRecovery.h NS6BufferFrameSize.h NS6ZeroTimestamp.h NS6ActiveFlow.h NS6IOMetrics.c NS6IOMetrics.h NS6AudioRecovery.c NS6AudioRecovery.h NS6FirmwareVersion.c NS6FirmwareVersion.h
+$(BUILD)/MacOS/NumarkNS6: FORCE NS6HAL.c NS6Transport.c NS6USB.c NS6USBEndpoint.h NS6USBConfig.h NS6USBTiming.c NS6USBTiming.h NS6USBFrameTimestamps.h NS6USBWorkerQoS.h NS6ClockControl.c NS6ClockControl.h NS6MIDI.c NS6MIDIParser.h NS6MIDIRecovery.h NS6MIDILease.h NS6BufferFrameSize.h NS6ZeroTimestamp.h NS6ActiveFlow.h NS6IOMetrics.c NS6IOMetrics.h NS6AudioRecovery.c NS6AudioRecovery.h NS6FirmwareVersion.c NS6FirmwareVersion.h NS6AudioTransportPolicy.h
 	mkdir -p $(BUILD)/MacOS
 	$(CC) $(CFLAGS) $(DRIVER_OPT_FLAGS) -bundle NS6HAL.c NS6Transport.c NS6USB.c NS6USBTiming.c NS6ClockControl.c NS6MIDI.c NS6IOMetrics.c NS6AudioRecovery.c NS6FirmwareVersion.c -o $@ -framework CoreAudio -framework CoreFoundation -framework IOKit
 $(BUILD)/Info.plist: Info.plist FORCE
@@ -59,9 +70,9 @@ $(APP)/Contents/Resources/NS6Status.icns: status-app/NS6Status.icns
 clean:
 	rm -rf build
 
-usb-test: NS6USBTest.c NS6Transport.c NS6USB.c NS6USBEndpoint.h NS6USBTiming.c NS6USBTiming.h NS6ClockControl.c NS6MIDI.c NS6AudioRecovery.c NS6AudioRecovery.h NS6FirmwareVersion.c NS6FirmwareVersion.h
+usb-test: NS6USBTest.c NS6Transport.c NS6USB.c NS6USBEndpoint.h NS6USBTiming.c NS6USBTiming.h NS6ClockControl.c NS6MIDI.c NS6IOMetrics.c NS6AudioRecovery.c NS6AudioRecovery.h NS6FirmwareVersion.c NS6FirmwareVersion.h
 	mkdir -p build
-	$(CC) $(CFLAGS) NS6USBTest.c NS6Transport.c NS6USB.c NS6USBTiming.c NS6ClockControl.c NS6MIDI.c NS6AudioRecovery.c NS6FirmwareVersion.c -o build/ns6-usb-test -framework CoreAudio -framework CoreFoundation -framework IOKit -lm
+	$(CC) $(CFLAGS) NS6USBTest.c NS6Transport.c NS6USB.c NS6USBTiming.c NS6ClockControl.c NS6MIDI.c NS6IOMetrics.c NS6AudioRecovery.c NS6FirmwareVersion.c -o build/ns6-usb-test -framework CoreAudio -framework CoreFoundation -framework IOKit -lm
 
 usb-work-interval-regression-test: $(BUILD)/MacOS/NumarkNS6 NS6USBWorkIntervalRegressionTest.sh
 	./NS6USBWorkIntervalRegressionTest.sh $(BUILD)/MacOS/NumarkNS6
@@ -75,9 +86,16 @@ midi-parser-test: NS6MIDIParserTest.c NS6MIDIParser.h
 	$(CC) -Wall -Wextra -Werror NS6MIDIParserTest.c -o build/ns6-midi-parser-test
 	build/ns6-midi-parser-test
 
+midi-report-test: NS6MIDIReportTest.c NS6MIDI.c NS6MIDI.h NS6MIDIParser.h NS6MIDIRecovery.h NS6MIDILease.h NS6USBConfig.h
+	mkdir -p build
+	$(CC) -Wall -Wextra -Werror NS6MIDIReportTest.c -o build/ns6-midi-report-test -framework CoreFoundation -framework IOKit
+	build/ns6-midi-report-test
+
 midi-recovery-test: NS6MIDIRecoveryTest.c NS6MIDIRecovery.h
 	$(CC) -Wall -Wextra -Werror NS6MIDIRecoveryTest.c -o build/ns6-midi-recovery-test
 	build/ns6-midi-recovery-test
+	$(CC) -Wall -Wextra -Werror -DNS6_MIDI_RECOVERY_SLOTS=16 NS6MIDIRecoveryTest.c -o build/ns6-midi-recovery-16-test
+	build/ns6-midi-recovery-16-test
 
 buffer-frame-size-test: NS6BufferFrameSizeTest.c NS6BufferFrameSize.h
 	$(CC) -Wall -Wextra -Werror NS6BufferFrameSizeTest.c -o build/ns6-buffer-frame-size-test
@@ -137,15 +155,15 @@ usb-config-test: NS6USBConfig.h NS6USBConfigTest.c
 	$(CC) -Wall -Wextra -Werror -DNS6_MIDI_ENABLED=0 -DNS6_FEEDBACK_READER_ENABLED=0 -DNS6_USB_OUTPUT_SLOT_COUNT=32 NS6USBConfigTest.c -o build/ns6-usb-config-diagnostic-test
 	build/ns6-usb-config-diagnostic-test
 
-test:
+test: audio-transport-policy-test midi-lease-test
 	mkdir -p build
 	$(MAKE) midi-parser-test midi-recovery-test buffer-frame-size-test zero-timestamp-test transport-ring-test clock-control-test clock-feedback-pattern-test clock-control-fixed-test clock-control-nominal-floor-test audio-recovery-test io-metrics-test usb-endpoint-test usb-timing-test usb-config-test firmware-version-test active-flow-test
 
 
 midi-bridge: build/NumarkNS6MIDIBridge
-build/NumarkNS6MIDIBridge: NS6MIDIBridge.c
+build/NumarkNS6MIDIBridge: NS6MIDIBridge.c NS6MIDILease.h
 	mkdir -p build
-	$(CC) $(CFLAGS) -Wno-deprecated-declarations NS6MIDIBridge.c -o $@ -framework CoreMIDI -framework CoreFoundation
+	$(CC) $(CFLAGS) -Wno-deprecated-declarations NS6MIDIBridge.c -o $@ -framework CoreMIDI -framework CoreFoundation -framework CoreAudio
 
 audio-list: AudioList.c
 	$(CC) $(CFLAGS) AudioList.c -o build/audio-list -framework CoreAudio -framework CoreFoundation
@@ -166,7 +184,6 @@ install: sign
 	sudo cp launch-agents/io.github.maurojuniorr.numark-ns6-midi-bridge.plist /Library/LaunchAgents/
 	-sudo killall -m '^Core Audio Driver \(NumarkNS6M1\.driver\)$$'
 	sudo killall coreaudiod
-
 package: usb-work-interval-regression-test sign
 	rm -rf $(PACKAGE_ROOT) $(DIST)
 	mkdir -p $(PACKAGE_ROOT)/Library/Audio/Plug-Ins/HAL $(PACKAGE_ROOT)/Library/LaunchAgents $(PACKAGE_ROOT)/Applications $(DIST)
@@ -174,7 +191,7 @@ package: usb-work-interval-regression-test sign
 	ditto --norsrc --noextattr $(APP) '$(PACKAGE_ROOT)/Applications/Numark NS6 Status.app'
 	cp launch-agents/io.github.maurojuniorr.numark-ns6-midi-bridge.plist $(PACKAGE_ROOT)/Library/LaunchAgents/
 	xattr -cr $(PACKAGE_ROOT)
-	pkgbuild --root $(PACKAGE_ROOT) --scripts package-scripts --identifier $(PACKAGE_ID) --version $(VERSION) --install-location / $(DIST)/NumarkNS6-$(VERSION).pkg
+	pkgbuild --root $(PACKAGE_ROOT) --component-plist package-components.plist --scripts package-scripts --identifier $(PACKAGE_ID) --version $(VERSION) --install-location / $(DIST)/NumarkNS6-$(VERSION).pkg
 
 uninstall:
 	sudo rm -rf /Library/Audio/Plug-Ins/HAL/NumarkNS6M1.driver
