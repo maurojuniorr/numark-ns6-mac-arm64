@@ -136,7 +136,7 @@ final class StatusController: NSViewController {
 
         let rows = [
             ("Device", "Numark NS6"),
-            ("Audio Inputs", "Not implemented"),
+            ("Audio Inputs", "2-channel USB capture (experimental)"),
             ("Audio Outputs", "4"),
             ("MIDI Input", "CoreMIDI bridge"),
             ("Clock Rate", "44.1 kHz"),

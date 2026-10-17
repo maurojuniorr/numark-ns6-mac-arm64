@@ -133,7 +133,7 @@ midi-parser-test: NS6MIDIParserTest.c NS6MIDIParser.h
 	$(CC) -Wall -Wextra -Werror NS6MIDIParserTest.c -o build/ns6-midi-parser-test
 	build/ns6-midi-parser-test
 
-midi-recovery-test: NS6MIDIRecoveryTest.c NS6MIDIRecovery.h NS6MIDIRecoveryOrderTest.py NS6MIDI.c
+midi-recovery-test: NS6MIDIRecoveryTest.c NS6MIDIRecovery.h NS6MIDIHandshake.h NS6MIDIRecoveryOrderTest.py NS6MIDI.c
 	mkdir -p build
 	$(CC) -Wall -Wextra -Werror NS6MIDIRecoveryTest.c -o build/ns6-midi-recovery-test
 	build/ns6-midi-recovery-test
@@ -205,7 +205,7 @@ $(EXPERIMENTAL_SERVICE): FORCE NS6MIDIBridge.c NS6DeviceMachService.c NS6DeviceO
 	$(CC) $(CFLAGS) -DNS6_DEVICE_SERVICE_BUILD=1 $(DRIVER_OPT_FLAGS) NS6MIDIBridge.c NS6DeviceMachService.c NS6Transport.c NS6USB.c NS6USBTiming.c NS6ClockControl.c NS6MIDI.c NS6AudioRecovery.c NS6FirmwareVersion.c -o $@ -framework CoreAudio -framework CoreFoundation -framework CoreMIDI -framework IOKit -lbsm -lm -pthread
 
 experimental-package: VERSION := $(EXPERIMENTAL_VERSION)
-experimental-package: service-lifecycle-test hal-mapping-test sign device-service build-experimental/NS6DeviceServiceProbe
+experimental-package: capture-test hal-service-boundary-test service-lifecycle-test hal-mapping-test sign device-service build-experimental/NS6DeviceServiceProbe
 	rm -rf $(EXPERIMENTAL_PACKAGE_ROOT) $(EXPERIMENTAL_DIST)
 	mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources $(EXPERIMENTAL_PACKAGE_ROOT)/Library/Audio/Plug-Ins/HAL $(EXPERIMENTAL_PACKAGE_ROOT)/Library/LaunchDaemons $(EXPERIMENTAL_PACKAGE_ROOT)/Library/LaunchAgents $(EXPERIMENTAL_PACKAGE_ROOT)/Applications $(EXPERIMENTAL_DIST)
 	cp $(EXPERIMENTAL_SERVICE) $(APP)/Contents/MacOS/NumarkNS6DeviceService

@@ -82,7 +82,6 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
 static atomic_bool running;
 static atomic_bool recovery_requested;
-static atomic_bool buffer_restart_requested;
 static atomic_bool output_paused=true;
 static atomic_bool awaiting_audio_prefill;
 static atomic_bool waveform_drain_running;
@@ -806,7 +805,7 @@ static bool initialize(void){
     return true;
 }
 static void cleanup(void){
-    if(atomic_exchange_explicit(&buffer_restart_requested,false,memory_order_acq_rel))ns6_midi_stop_for_audio_restart();else ns6_midi_stop();
+    ns6_midi_stop();
     atomic_store_explicit(&waveform_drain_running,false,memory_order_release);
     if(interface)(*interface)->AbortPipe(interface,1);if(auxiliary_interface&&feedback_pipe)(*auxiliary_interface)->AbortPipe(auxiliary_interface,feedback_pipe);if(auxiliary_interface&&waveform_pipe)(*auxiliary_interface)->AbortPipe(auxiliary_interface,waveform_pipe); if(run_loop)CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.2,false);
     for(unsigned i=0;i<FEEDBACK_SLOT_COUNT;++i)atomic_store_explicit(&feedback_in_flight[i],false,memory_order_release);
@@ -869,6 +868,10 @@ static void *worker(void *unused){
         bool feedback_reads_active=false;
         while(atomic_load_explicit(&running,memory_order_acquire)&&!atomic_load_explicit(&recovery_requested,memory_order_acquire)){
             CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.1,false);
+            if(midi_session_active&&ns6_midi_take_handshake_request()){
+                os_log(OS_LOG_DEFAULT,"Numark NS6 replaying host-identify after MIDI endpoint recovery to refresh controller state");
+                (void)ns6_midi_handshake(run_loop);
+            }
             uint64_t capture_demand=shared_capture_last_demand_ns?atomic_load_explicit(shared_capture_last_demand_ns,memory_order_acquire):atomic_load_explicit(&capture_last_demand_ns,memory_order_acquire);
             bool capture_active_now=shared_capture_requested?atomic_load_explicit(shared_capture_requested,memory_order_acquire):atomic_load_explicit(&capture_active,memory_order_acquire);
             bool capture_requested=capture_active_now&&capture_demand&&monotonic_ns()-capture_demand<250000000ull;
@@ -914,7 +917,6 @@ bool ns6_usb_request_restart(void){
     pthread_mutex_lock(&lock);
     if(!thread_created){pthread_mutex_unlock(&lock);return ns6_usb_start();}
     initialized=false;
-    atomic_store_explicit(&buffer_restart_requested,true,memory_order_release);
     atomic_store_explicit(&output_paused,true,memory_order_release);
     atomic_store_explicit(&recovery_requested,true,memory_order_release);
     if(run_loop)CFRunLoopWakeUp(run_loop);

@@ -1,8 +1,26 @@
 #include "NS6MIDIRecovery.h"
+#include "NS6MIDIHandshake.h"
 #include <assert.h>
 #include <stdio.h>
+#include <string.h>
 
 int main(void) {
+    static const unsigned char expected_identify[] = {
+        0xf0,0x00,0x01,0x3f,0x7f,0x79,0x50,0x00,0x10,0x04,0x01,0x00,0x00,0x00,
+        0x04,0x04,0x0e,0x0f,0x00,0x00,0x0e,0x05,0x0f,0x04,0x0c,0x06,0x0b,0x0f,0x0d,0x0c,0xf7
+    };
+    static const unsigned char expected_jog_enable[] = {
+        0xb1,0x3b,0x01,0xb2,0x3b,0x01,0xb3,0x3b,0x01,0xb4,0x3b,0x01
+    };
+    static const unsigned char expected_wake[] = {
+        0xf0,0x00,0x01,0x3f,0x7f,0x79,0x60,0x00,0x01,0x49,0x01,0x00,0x00,0x00,0x00,0xf7
+    };
+    assert(sizeof(NS6_MIDI_HOST_IDENTIFY) == sizeof(expected_identify));
+    assert(memcmp(NS6_MIDI_HOST_IDENTIFY, expected_identify, sizeof(expected_identify)) == 0);
+    assert(sizeof(NS6_MIDI_JOG_ENABLE) == sizeof(expected_jog_enable));
+    assert(memcmp(NS6_MIDI_JOG_ENABLE, expected_jog_enable, sizeof(expected_jog_enable)) == 0);
+    assert(sizeof(NS6_MIDI_WAKE) == sizeof(expected_wake));
+    assert(memcmp(NS6_MIDI_WAKE, expected_wake, sizeof(expected_wake)) == 0);
     assert(ns6_midi_recovery_error_class(0xe00002ed, 0xe00002ed, 0xe000404f) == NS6_MIDI_ERROR_NOT_RESPONDING);
     assert(ns6_midi_recovery_error_class(0xe000404f, 0xe00002ed, 0xe000404f) == NS6_MIDI_ERROR_PIPE_STALLED);
     assert(ns6_midi_recovery_error_class(0x12345678, 0xe00002ed, 0xe000404f) == NS6_MIDI_ERROR_OTHER);
@@ -16,6 +34,10 @@ int main(void) {
     assert(ns6_midi_recovery_requires_pipe_clear(0xe000404f, 0xe000404f));
     assert(!ns6_midi_recovery_requires_pipe_clear(0xe00002ed, 0xe000404f));
     assert(!ns6_midi_recovery_requires_pipe_clear(0x12345678, 0xe000404f));
+    assert(ns6_midi_recovery_should_reidentify(1, 1, 1));
+    assert(!ns6_midi_recovery_should_reidentify(0, 1, 1));
+    assert(!ns6_midi_recovery_should_reidentify(1, 0, 1));
+    assert(!ns6_midi_recovery_should_reidentify(1, 1, 0));
     uint32_t inflight = 0;
     inflight = ns6_midi_in_flight_set(inflight, 0);
     inflight = ns6_midi_in_flight_set(inflight, 1);

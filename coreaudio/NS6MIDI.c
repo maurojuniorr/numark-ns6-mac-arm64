@@ -1,6 +1,7 @@
 #include "NS6MIDI.h"
 #include "NS6MIDIParser.h"
 #include "NS6MIDIRecovery.h"
+#include "NS6MIDIHandshake.h"
 #include "NS6MIDIReadLifecycle.h"
 #include "NS6USBConfig.h"
 #include <arpa/inet.h>
@@ -59,6 +60,7 @@ static bool writer_started,receiver_started;
 static int inbound_socket=-1,outbound_socket=-1;
 static struct sockaddr_in bridge_address;
 static atomic_bool running;
+static atomic_bool handshake_requested;
 
 static uint64_t monotonic_ms(void){struct timespec now;clock_gettime(CLOCK_MONOTONIC,&now);return (uint64_t)now.tv_sec*1000+(uint64_t)now.tv_nsec/1000000;}
 static uint64_t monotonic_us(void){struct timespec now;clock_gettime(CLOCK_MONOTONIC,&now);return (uint64_t)now.tv_sec*1000000+(uint64_t)now.tv_nsec/1000;}
@@ -393,6 +395,8 @@ static void *write_worker(void *unused){
                 pthread_mutex_unlock(&queue_lock);
             }
             consecutive_recovery_failures=all_submitted?0:(consecutive_recovery_failures<6?consecutive_recovery_failures+1:6);
+            if(ns6_midi_recovery_should_reidentify(clear_pending,recovered,all_submitted))
+                atomic_store_explicit(&handshake_requested,true,memory_order_release);
             in_flight=read_in_flight_snapshot();
             os_log(OS_LOG_DEFAULT,"Numark NS6 MIDI input recovery resubmission: requested slots 0x%x, all submitted %{public}s, reads in flight %u/4 (mask 0x%x), minimum %u/4",
                 recovery_mask,all_submitted?"yes":"no",ns6_midi_in_flight_count(in_flight),in_flight,read_in_flight_minimum_snapshot());
@@ -406,33 +410,6 @@ static void *write_worker(void *unused){
         if(result!=kIOReturnSuccess)os_log_error(OS_LOG_DEFAULT,"Numark NS6 MIDI output failed: %{public}u",(unsigned)result);
     }
     return NULL;
-}
-static void send_blackout_report(unsigned char *packet,unsigned *reports,unsigned *failures){
-    IOReturn result=(*usb)->WritePipe(usb,output_pipe,packet,MIDI_PACKET_BYTES);
-    ++*reports;
-    if(result!=kIOReturnSuccess){++*failures;os_log_error(OS_LOG_DEFAULT,"Numark NS6 MIDI shutdown blackout write failed: 0x%08x (%u)",(unsigned)result,(unsigned)result);}
-}
-static void blackout_controller(void){
-    if(!usb||!output_pipe)return;
-    unsigned char packet[MIDI_PACKET_BYTES];
-    const struct timespec settle={.tv_nsec=2000000};
-    unsigned reports=0,failures=0;uint64_t started_us=monotonic_us();
-    for(unsigned pass=0;pass<2;++pass){
-        unsigned used=0;
-        memset(packet,MIDI_IDLE_BYTE,sizeof(packet));
-        for(unsigned channel=0;channel<=4;++channel){
-            for(unsigned cc=0;cc<=0x51;++cc){
-                packet[used++]=0xb0+channel;packet[used++]=cc;packet[used++]=0;
-                if(used==39){packet[41]=MIDI_TERMINATOR;send_blackout_report(packet,&reports,&failures);nanosleep(&settle,NULL);memset(packet,MIDI_IDLE_BYTE,sizeof(packet));used=0;}
-            }
-            for(unsigned note=0;note<=0x50;++note){
-                packet[used++]=0x80+channel;packet[used++]=note;packet[used++]=0;
-                if(used==39){packet[41]=MIDI_TERMINATOR;send_blackout_report(packet,&reports,&failures);nanosleep(&settle,NULL);memset(packet,MIDI_IDLE_BYTE,sizeof(packet));used=0;}
-            }
-        }
-        if(used){packet[41]=MIDI_TERMINATOR;send_blackout_report(packet,&reports,&failures);nanosleep(&settle,NULL);}
-    }
-    os_log(OS_LOG_DEFAULT,"Numark NS6 MIDI transport-cleanup blackout completed: %u USB reports, %u write failures, %llu us",reports,failures,(unsigned long long)ns6_midi_recovery_elapsed_us(started_us,monotonic_us()));
 }
 static void *receive_worker(void *unused){(void)unused;unsigned char data[41];while(atomic_load(&running)){ssize_t length=recv(inbound_socket,data,sizeof(data),0);if(length>0)enqueue(data,(unsigned)length);}return NULL;}
 static bool open_sockets(void){
@@ -451,6 +428,7 @@ bool ns6_midi_start(IOUSBInterfaceInterface **new_usb,CFRunLoopRef run_loop){
     usb=new_usb;input_pipe=output_pipe=0;head=tail=0;pending_read_recovery_mask=pending_read_clear_mask=0;memset(&parser,0,sizeof(parser));writer_started=receiver_started=false;
     atomic_store(&read_in_flight_mask,0);atomic_store(&read_in_flight_minimum_count,MIDI_READ_SLOTS);atomic_store(&read_in_flight_minimum_tracking,false);
     atomic_store(&input_pipe_recovery_active,false);
+    atomic_store(&handshake_requested,false);
     atomic_store(&audio_client_active,NS6_MIDI_INITIAL_READ_COUNT>=NS6_MIDI_ACTIVE_READ_COUNT);
     atomic_store(&read_target_count,ns6_midi_read_initial_count(true));
     atomic_store(&last_input_error_log_ms,0);
@@ -492,14 +470,11 @@ static void pump_until(CFRunLoopRef loop,uint64_t deadline){
 }
 bool ns6_midi_handshake(CFRunLoopRef loop){
     if(!atomic_load(&running)||!loop)return false;
-    unsigned char identify[31]={0xf0,0x00,0x01,0x3f,0x7f,0x79,0x50,0x00,0x10,0x04,0x01,0x00,0x00,0x00};
-    for(unsigned i=14;i<30;++i)identify[i]=(unsigned char)(arc4random()&0x0f);
-    identify[30]=0xf7;
     pthread_mutex_lock(&handshake_lock);
     handshake_capture=true;handshake_reply_seen=false;handshake_sysex_active=false;handshake_sysex_length=0;
     pthread_mutex_unlock(&handshake_lock);
     uint64_t started=monotonic_ms();
-    enqueue(identify,sizeof(identify));
+    enqueue(NS6_MIDI_HOST_IDENTIFY,sizeof(NS6_MIDI_HOST_IDENTIFY));
     uint64_t reply_deadline=started+100;
     while(monotonic_ms()<reply_deadline){
         pthread_mutex_lock(&handshake_lock);bool received=handshake_reply_seen;pthread_mutex_unlock(&handshake_lock);
@@ -510,16 +485,18 @@ bool ns6_midi_handshake(CFRunLoopRef loop){
     if(!received)os_log_error(OS_LOG_DEFAULT,"Numark NS6 host-identify sent but device 0x51 reply was not observed");
     /* The official sequence holds this gap for about 795 ms after host 0x50. */
     pump_until(loop,started+795);
-    const unsigned char jog_enable[]={0xb1,0x3b,0x01,0xb2,0x3b,0x01,0xb3,0x3b,0x01,0xb4,0x3b,0x01};
-    static const unsigned char wake[]={0xf0,0x00,0x01,0x3f,0x7f,0x79,0x60,0x00,0x01,0x49,0x01,0x00,0x00,0x00,0x00,0xf7};
-    enqueue(jog_enable,sizeof(jog_enable));
+    enqueue(NS6_MIDI_JOG_ENABLE,sizeof(NS6_MIDI_JOG_ENABLE));
     pump_until(loop,started+796);
-    enqueue(wake,sizeof(wake));
+    enqueue(NS6_MIDI_WAKE,sizeof(NS6_MIDI_WAKE));
     pthread_mutex_lock(&handshake_lock);handshake_capture=false;handshake_sysex_active=false;pthread_mutex_unlock(&handshake_lock);
     os_log(OS_LOG_DEFAULT,"Numark NS6 host-identify handshake completed; device reply %{public}s",received?"observed":"not observed");
     return received;
 }
-static void stop_midi(bool blackout){
+bool ns6_midi_take_handshake_request(void){
+    return atomic_exchange_explicit(&handshake_requested,false,memory_order_acq_rel);
+}
+void ns6_midi_stop(void){
+    atomic_store_explicit(&handshake_requested,false,memory_order_release);
     atomic_store_explicit(&audio_client_active,false,memory_order_release);
     bool was_running=atomic_exchange(&running,false);
     atomic_store_explicit(&read_target_count,0,memory_order_release);
@@ -528,14 +505,7 @@ static void stop_midi(bool blackout){
     if(usb&&input_pipe)(*usb)->AbortPipe(usb,input_pipe);
     if(inbound_socket>=0){close(inbound_socket);inbound_socket=-1;}
     if(writer_started){pthread_join(writer,NULL);writer_started=false;}
-    /* The HAL still owns the USB interface here. Do the blackout before the
-       audio shutdown releases it; Mixxx may already have destroyed its MIDI
-       endpoint and cannot be relied on to call the mapping shutdown hook. */
-    if(blackout){os_log(OS_LOG_DEFAULT,"Numark NS6 MIDI transport cleanup requested controller blackout");blackout_controller();}
-    else os_log(OS_LOG_DEFAULT,"Numark NS6 MIDI transport restart skipped controller blackout");
     if(receiver_started){pthread_join(receiver,NULL);receiver_started=false;}
     if(outbound_socket>=0){close(outbound_socket);outbound_socket=-1;}
     usb=NULL;input_pipe=output_pipe=0;
 }
-void ns6_midi_stop(void){stop_midi(true);}
-void ns6_midi_stop_for_audio_restart(void){stop_midi(false);}

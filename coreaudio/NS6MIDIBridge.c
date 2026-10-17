@@ -121,16 +121,6 @@ static unsigned midi_length(unsigned char status){
 static void send_to_driver(const unsigned char *data,size_t length){
     if(socket_fd>=0&&length){ssize_t sent=sendto(socket_fd,data,length,0,(const struct sockaddr *)&driver_address,sizeof(driver_address));if(sent>0){atomic_fetch_add_explicit(&outbound_reports,1,memory_order_relaxed);atomic_fetch_add_explicit(&outbound_bytes,(uint64_t)sent,memory_order_relaxed);}}
 }
-static unsigned blackout_controller(void){
-    unsigned char report[39];
-    size_t used=0;unsigned reports=0;
-    for(unsigned channel=0;channel<=4;++channel){
-        for(unsigned cc=0;cc<=0x51;++cc){report[used++]=0xb0+channel;report[used++]=cc;report[used++]=0;if(used==sizeof(report)){send_to_driver(report,used);++reports;used=0;}}
-        for(unsigned note=0;note<=0x50;++note){report[used++]=0x80+channel;report[used++]=note;report[used++]=0;if(used==sizeof(report)){send_to_driver(report,used);++reports;used=0;}}
-    }
-    if(used){send_to_driver(report,used);++reports;}
-    return reports;
-}
 static void log_outbound_activity(void){
     uint64_t now=monotonic_ms();
     if(now-last_activity_log_ms<1000)return;
@@ -164,8 +154,7 @@ static void receive_from_application(const MIDIPacketList *list,void *reference,
             unsigned length=midi_length(status);
             if(!length||offset+length>packet->length){++offset;continue;}
             /* The NS6 accepts up to 41 bytes of MIDI payload in its fixed
-               42-byte USB report. Batching prevents the close-time LED
-               blackout from overflowing the driver's write queue. */
+               42-byte USB report. */
             if(used+length>sizeof(report)){
                 send_to_driver(report,used);
                 used=0;
@@ -230,8 +219,8 @@ int main(void){
         if(length<=0){
             uint64_t heartbeat=atomic_load(&last_heartbeat_ms);
             if(heartbeat&&monotonic_ms()-heartbeat>HEARTBEAT_TIMEOUT_MS){
-                uint64_t age=monotonic_ms()-heartbeat;unsigned reports=blackout_controller();
-                os_log(OS_LOG_DEFAULT,"Numark NS6 MIDI bridge heartbeat timeout after %llu ms; attempted blackout sweep (%u reports, 815 MIDI messages)",(unsigned long long)age,reports);
+                uint64_t age=monotonic_ms()-heartbeat;
+                os_log(OS_LOG_DEFAULT,"Numark NS6 MIDI bridge heartbeat timeout after %llu ms",(unsigned long long)age);
                 atomic_store(&last_heartbeat_ms,0);
             }
             log_outbound_activity();

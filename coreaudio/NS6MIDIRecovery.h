@@ -31,6 +31,11 @@ static inline int ns6_midi_recovery_requires_pipe_clear(uint32_t status, uint32_
     return status == pipe_stalled_status;
 }
 
+static inline int ns6_midi_recovery_should_reidentify(
+    int pipe_stall_recovered, int recovery_succeeded, int all_reads_resubmitted) {
+    return pipe_stall_recovered && recovery_succeeded && all_reads_resubmitted;
+}
+
 static inline uint32_t ns6_midi_in_flight_set(uint32_t mask, unsigned slot) {
     return slot < NS6_MIDI_RECOVERY_SLOTS ? mask | (UINT32_C(1) << slot) : mask;
 }
