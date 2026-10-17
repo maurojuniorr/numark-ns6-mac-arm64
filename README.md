@@ -11,10 +11,9 @@ Linux project is also still in progress. This repository adapts that shared
 hardware knowledge to macOS; it is not a port of Numark's discontinued driver
 and is not an official Numark or Ploytec product.
 
-> **Current release: 0.2.123.** The adaptive-clock driver has been tested with
-> an original NS6 on an M1 Pro Mac running macOS Sequoia and has been stable in
-> the maintainer's recent sessions. Testing with other Macs, macOS releases,
-> and audio applications is still welcome.
+> **Stable version: 0.2.138.** Candidate 0.2.139 adds experimental stereo
+> audio input for hardware validation; it keeps the 0.2.138 USB ownership and
+> audio-output architecture.
 
 ## ✨ What's new in 0.2.123
 
@@ -81,12 +80,12 @@ packet/transfer errors, and recovery events.
 
 ## ⚠️ Current limitations
 
-- **Audio capture is not implemented** as a macOS input device. The Ploytec
-  kext contains generic input-stream code, but the available Mojave USB trace
-  shows no separate PCM input endpoint: `0x81` carries short feedback data,
-  `0x86` carries structured bulk data used by the waveform path, and the other
-  endpoints are playback/MIDI. A Windows capture with known audio on the
-  physical inputs is still needed to reconcile “Inputs: 2” with the USB traffic.
+- **Experimental audio input (0.2.139 candidate):** the HAL exposes a stereo
+  44.1 kHz input stream and decodes the NS6 bulk-IN `0x86` payload while an
+  application requests capture. The endpoint was previously used as a waveform
+  drain; input was observed on hardware in an earlier build, but this port onto
+  the stable 0.2.138 USB architecture still needs hardware validation, including
+  capture while MIDI and playback are active. Treat 0.2.138 as the stable build.
 - **Hardware coverage is limited.** The current release has been stable in
   recent sessions on the maintainer's M1 Pro/Sequoia setup; testing on other
   systems and longer sessions is still needed to characterize rare failures.

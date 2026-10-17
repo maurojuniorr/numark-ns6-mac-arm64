@@ -21,7 +21,7 @@
 #include <string.h>
 #include <time.h>
 
-enum { DEVICE_ID=2, STREAM_ID=3 };
+enum { DEVICE_ID=2, STREAM_ID=3, INPUT_STREAM_ID=4 };
 #define SAMPLE_RATE 44100.0
 #define CHANNELS 4
 #define NS6_DRIVER_BUFFER_PROPERTY ((AudioObjectPropertySelector)0x6e733662u) /* 'ns6b' */
@@ -61,6 +61,7 @@ static pthread_once_t io_metrics_once=PTHREAD_ONCE_INIT;
 static pthread_mutex_t stream_lock=PTHREAD_MUTEX_INITIALIZER;
 static bool transport_open;
 static AudioStreamBasicDescription stream_format={SAMPLE_RATE,kAudioFormatLinearPCM,kAudioFormatFlagIsFloat|kAudioFormatFlagsNativeEndian|kAudioFormatFlagIsPacked,16,1,16,CHANNELS,32,0};
+static AudioStreamBasicDescription input_stream_format={SAMPLE_RATE,kAudioFormatLinearPCM,kAudioFormatFlagIsFloat|kAudioFormatFlagsNativeEndian|kAudioFormatFlagIsPacked,8,1,8,2,32,0};
 
 static HRESULT query_interface(void*,REFIID,LPVOID*); static ULONG add_ref(void*); static ULONG release_ref(void*);
 static OSStatus initialize(AudioServerPlugInDriverRef,AudioServerPlugInHostRef); static OSStatus create_device(AudioServerPlugInDriverRef,CFDictionaryRef,const AudioServerPlugInClientInfo*,AudioObjectID*); static OSStatus destroy_device(AudioServerPlugInDriverRef,AudioObjectID);
@@ -97,7 +98,7 @@ static void *usb_monitor_thread(void *unused){(void)unused;usb_notifications=ION
 static void monitor_usb(void){pthread_t thread;if(pthread_create(&thread,NULL,usb_monitor_thread,NULL)==0)pthread_detach(thread);}
 
 void *NS6_Create(CFAllocatorRef allocator,CFUUIDRef type){(void)allocator;return CFEqual(type,kAudioServerPlugInTypeUUID)?driver:NULL;}
-static bool valid_object(AudioObjectID object){return object==kAudioObjectPlugInObject||object==DEVICE_ID||object==STREAM_ID;}
+static bool valid_object(AudioObjectID object){return object==kAudioObjectPlugInObject||object==DEVICE_ID||object==STREAM_ID||object==INPUT_STREAM_ID;}
 static bool supported_buffer_size(UInt32 frames);
 static void *restart_usb_for_buffer(void *unused);
 static HRESULT query_interface(void *value,REFIID uuid,LPVOID *out){if(value!=driver||!out)return E_NOINTERFACE;CFUUIDRef requested=CFUUIDCreateFromUUIDBytes(NULL,uuid);HRESULT result=E_NOINTERFACE;if(requested&&(CFEqual(requested,IUnknownUUID)||CFEqual(requested,kAudioServerPlugInDriverInterfaceUUID))){*out=driver;++references;result=0;}if(requested)CFRelease(requested);return result;}
@@ -120,7 +121,9 @@ static Boolean has_property(AudioServerPlugInDriverRef d,AudioObjectID object,pi
     switch(address->mSelector){case kAudioStreamPropertyIsActive:case kAudioStreamPropertyDirection:case kAudioStreamPropertyTerminalType:case kAudioStreamPropertyStartingChannel:case kAudioStreamPropertyLatency:case kAudioStreamPropertyVirtualFormat:case kAudioStreamPropertyPhysicalFormat:case kAudioStreamPropertyAvailableVirtualFormats:case kAudioStreamPropertyAvailablePhysicalFormats:return true;default:return false;}
 }
 static OSStatus is_settable(AudioServerPlugInDriverRef d,AudioObjectID o,pid_t p,const AudioObjectPropertyAddress*a,Boolean*out){if(!out)return kAudioHardwareIllegalOperationError;if(!has_property(d,o,p,a))return kAudioHardwareUnknownPropertyError;*out=o==DEVICE_ID&&(a->mSelector==NS6_DRIVER_BUFFER_PROPERTY||a->mSelector==kAudioDevicePropertyBufferFrameSize);return 0;}
-static UInt32 scoped_count(const AudioObjectPropertyAddress *a){return a->mScope==kAudioObjectPropertyScopeInput?0:1;}
+static UInt32 scoped_count(const AudioObjectPropertyAddress *a){return a->mScope==kAudioObjectPropertyScopeGlobal?2:1;}
+static UInt32 channels_for_scope(const AudioObjectPropertyAddress *a){return a->mScope==kAudioObjectPropertyScopeInput?2:CHANNELS;}
+static const AudioStreamBasicDescription *format_for_stream(AudioObjectID stream){return stream==INPUT_STREAM_ID?&input_stream_format:&stream_format;}
 static OSStatus property_size(AudioServerPlugInDriverRef d,AudioObjectID object,pid_t pid,const AudioObjectPropertyAddress *a,UInt32 q,const void*x,UInt32 *out){
     (void)q;(void)x;if(!out)return kAudioHardwareIllegalOperationError;if(!has_property(d,object,pid,a))return kAudioHardwareUnknownPropertyError;
     switch(a->mSelector){
@@ -128,7 +131,7 @@ static OSStatus property_size(AudioServerPlugInDriverRef d,AudioObjectID object,
         case kAudioObjectPropertyCustomPropertyInfoList:*out=object==DEVICE_ID?sizeof(custom_property_info):0;break;
         case NS6_DRIVER_BUFFER_PROPERTY:*out=sizeof(CFStringRef);break;
         case NS6_BUFFER_RESTART_PROPERTY:case NS6_ACTIVE_IO_FRAMES_PROPERTY:case NS6_ACTIVE_CLIENT_PROPERTY:case NS6_FIRMWARE_VERSION_PROPERTY:*out=sizeof(CFStringRef);break;
-        case kAudioObjectPropertyOwnedObjects:*out=(object==kAudioObjectPlugInObject&&!atomic_load(&device_present))?0:((object==kAudioObjectPlugInObject||object==DEVICE_ID)?sizeof(AudioObjectID):0);break;
+        case kAudioObjectPropertyOwnedObjects:*out=(object==kAudioObjectPlugInObject&&!atomic_load(&device_present))?0:(object==kAudioObjectPlugInObject?sizeof(AudioObjectID):(object==DEVICE_ID?2*sizeof(AudioObjectID):0));break;
         case kAudioPlugInPropertyDeviceList:*out=atomic_load(&device_present)?sizeof(AudioObjectID):0;break;
         case kAudioDevicePropertyRelatedDevices:*out=sizeof(AudioObjectID);break;
         case kAudioDevicePropertyStreams:*out=scoped_count(a)*sizeof(AudioObjectID);break;
@@ -148,7 +151,7 @@ static CFStringRef string_property(AudioObjectID object,AudioObjectPropertySelec
     if(selector==kAudioDevicePropertyModelUID)return CFSTR("io.github.maurojuniorr.numark-ns6.original");
     if(selector==kAudioPlugInPropertyResourceBundle)return CFSTR("");
     if(object==kAudioObjectPlugInObject)return CFSTR("Numark NS6 Plug-In");
-    if(object==DEVICE_ID)return CFSTR("Numark NS6"); return CFSTR("Numark NS6 Output");
+    if(object==DEVICE_ID)return CFSTR("Numark NS6"); if(object==INPUT_STREAM_ID)return CFSTR("Numark NS6 Input"); return CFSTR("Numark NS6 Output");
 }
 static OSStatus get_property(AudioServerPlugInDriverRef d,AudioObjectID object,pid_t pid,const AudioObjectPropertyAddress *a,UInt32 q,const void*x,UInt32 input_size,UInt32 *output_size,void *output){
     UInt32 needed=0;OSStatus status=property_size(d,object,pid,a,q,x,&needed);if(status)return status;if(input_size<needed)return kAudioHardwareBadPropertySizeError;if(output_size)*output_size=needed;if(!needed)return 0;if(!output)return kAudioHardwareIllegalOperationError;
@@ -162,22 +165,22 @@ static OSStatus get_property(AudioServerPlugInDriverRef d,AudioObjectID object,p
         case NS6_ACTIVE_CLIENT_PROPERTY:{pid_t active_pid=0;char bundle_id[256]={0};uint64_t max_age=2000000000ull*timebase.denom/timebase.numer;NS6ActiveFlowSnapshot flow=ns6_active_flow_snapshot(&active_flow,mach_absolute_time(),max_age);pthread_mutex_lock(&stream_lock);NS6TrackedClient *client=flow.frames?find_client_locked(flow.client_id):NULL;if(client){active_pid=client->pid;memcpy(bundle_id,client->bundle_id,sizeof(bundle_id));}pthread_mutex_unlock(&stream_lock);*(CFStringRef*)output=CFStringCreateWithFormat(kCFAllocatorDefault,NULL,CFSTR("%d|%s"),active_pid,bundle_id);return *(CFStringRef*)output?0:kAudioHardwareUnspecifiedError;}
         case kAudioObjectPropertyBaseClass:*(AudioClassID*)output=kAudioObjectClassID;return 0;
         case kAudioObjectPropertyClass:*(AudioClassID*)output=object==kAudioObjectPlugInObject?kAudioPlugInClassID:(object==DEVICE_ID?kAudioDeviceClassID:kAudioStreamClassID);return 0;
-        case kAudioObjectPropertyOwner:*(AudioObjectID*)output=object==STREAM_ID?DEVICE_ID:kAudioObjectUnknown;return 0;
-        case kAudioObjectPropertyOwnedObjects:*(AudioObjectID*)output=object==kAudioObjectPlugInObject?DEVICE_ID:STREAM_ID;return 0;
+        case kAudioObjectPropertyOwner:*(AudioObjectID*)output=(object==STREAM_ID||object==INPUT_STREAM_ID)?DEVICE_ID:kAudioObjectUnknown;return 0;
+        case kAudioObjectPropertyOwnedObjects:if(object==kAudioObjectPlugInObject)*(AudioObjectID*)output=DEVICE_ID;else if(object==DEVICE_ID){((AudioObjectID*)output)[0]=STREAM_ID;((AudioObjectID*)output)[1]=INPUT_STREAM_ID;}return 0;
         case kAudioPlugInPropertyDeviceList:if(atomic_load(&device_present))*(AudioObjectID*)output=DEVICE_ID;return 0;
         case kAudioDevicePropertyRelatedDevices:*(AudioObjectID*)output=DEVICE_ID;return 0;
-        case kAudioDevicePropertyStreams:*(AudioObjectID*)output=STREAM_ID;return 0;
+        case kAudioDevicePropertyStreams:if(a->mScope==kAudioObjectPropertyScopeInput)*(AudioObjectID*)output=INPUT_STREAM_ID;else if(a->mScope==kAudioObjectPropertyScopeOutput)*(AudioObjectID*)output=STREAM_ID;else{((AudioObjectID*)output)[0]=STREAM_ID;((AudioObjectID*)output)[1]=INPUT_STREAM_ID;}return 0;
         case kAudioDevicePropertyNominalSampleRate:*(Float64*)output=SAMPLE_RATE;return 0;
         case kAudioDevicePropertyAvailableNominalSampleRates:{AudioValueRange r={SAMPLE_RATE,SAMPLE_RATE};*(AudioValueRange*)output=r;return 0;}
         case kAudioDevicePropertyBufferFrameSizeRange:{AudioValueRange r={supported_buffer_frames[0],supported_buffer_frames[sizeof(supported_buffer_frames)/sizeof(supported_buffer_frames[0])-1]};*(AudioValueRange*)output=r;unsigned log_count=atomic_fetch_add_explicit(&buffer_range_read_log_count,1,memory_order_relaxed);if(log_count<16)os_log(OS_LOG_DEFAULT,"Numark NS6 buffer range callback: pid %d scope 0x%x element %u => %.0f..%.0f frames",pid,a->mScope,a->mElement,r.mMinimum,r.mMaximum);return 0;}
         case kAudioDevicePropertyPreferredChannelsForStereo:((UInt32*)output)[0]=1;((UInt32*)output)[1]=2;return 0;
-        case kAudioDevicePropertyStreamConfiguration:{AudioBufferList *list=output;list->mNumberBuffers=1;list->mBuffers[0].mNumberChannels=scoped_count(a)?CHANNELS:0;list->mBuffers[0].mDataByteSize=0;list->mBuffers[0].mData=NULL;return 0;}
-        case kAudioStreamPropertyVirtualFormat:case kAudioStreamPropertyPhysicalFormat:*(AudioStreamBasicDescription*)output=stream_format;return 0;
-        case kAudioStreamPropertyAvailableVirtualFormats:case kAudioStreamPropertyAvailablePhysicalFormats:{AudioStreamRangedDescription r={stream_format,{SAMPLE_RATE,SAMPLE_RATE}};*(AudioStreamRangedDescription*)output=r;return 0;}
+        case kAudioDevicePropertyStreamConfiguration:{AudioBufferList *list=output;list->mNumberBuffers=1;list->mBuffers[0].mNumberChannels=channels_for_scope(a);list->mBuffers[0].mDataByteSize=0;list->mBuffers[0].mData=NULL;return 0;}
+        case kAudioStreamPropertyVirtualFormat:case kAudioStreamPropertyPhysicalFormat:*(AudioStreamBasicDescription*)output=*format_for_stream(object);return 0;
+        case kAudioStreamPropertyAvailableVirtualFormats:case kAudioStreamPropertyAvailablePhysicalFormats:{const AudioStreamBasicDescription *format=format_for_stream(object);AudioStreamRangedDescription r={*format,{SAMPLE_RATE,SAMPLE_RATE}};*(AudioStreamRangedDescription*)output=r;return 0;}
         default:break;
     }
     UInt32 value=0;
-    switch(a->mSelector){case kAudioDevicePropertyTransportType:value=kAudioDeviceTransportTypeUSB;break;case kAudioDevicePropertyDeviceIsAlive:value=atomic_load(&device_present)?1:0;break;case kAudioDevicePropertyDeviceCanBeDefaultDevice:case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice:case kAudioStreamPropertyIsActive:value=1;break;case kAudioDevicePropertyDeviceIsRunning:value=atomic_load(&io_clients)?1:0;break;case kAudioDevicePropertyBufferFrameSize:value=atomic_load_explicit(&buffer_frames,memory_order_acquire);break;case kAudioDevicePropertyZeroTimeStampPeriod:value=NS6_ZERO_TIMESTAMP_PERIOD;break;case kAudioStreamPropertyDirection:value=0;break;case kAudioStreamPropertyTerminalType:value=kAudioStreamTerminalTypeLine;break;case kAudioStreamPropertyStartingChannel:value=1;break;default:value=0;break;}*(UInt32*)output=value;if(a->mSelector==kAudioDevicePropertyBufferFrameSize){unsigned log_count=atomic_fetch_add_explicit(&buffer_size_read_log_count,1,memory_order_relaxed);if(log_count<16)os_log(OS_LOG_DEFAULT,"Numark NS6 buffer size callback: pid %d scope 0x%x element %u => %u frames",pid,a->mScope,a->mElement,value);}return 0;
+    switch(a->mSelector){case kAudioDevicePropertyTransportType:value=kAudioDeviceTransportTypeUSB;break;case kAudioDevicePropertyDeviceIsAlive:value=atomic_load(&device_present)?1:0;break;case kAudioDevicePropertyDeviceCanBeDefaultDevice:case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice:case kAudioStreamPropertyIsActive:value=1;break;case kAudioDevicePropertyDeviceIsRunning:value=atomic_load(&io_clients)?1:0;break;case kAudioDevicePropertyBufferFrameSize:value=atomic_load_explicit(&buffer_frames,memory_order_acquire);break;case kAudioDevicePropertyZeroTimeStampPeriod:value=NS6_ZERO_TIMESTAMP_PERIOD;break;case kAudioStreamPropertyDirection:value=object==INPUT_STREAM_ID?1:0;break;case kAudioStreamPropertyTerminalType:value=kAudioStreamTerminalTypeLine;break;case kAudioStreamPropertyStartingChannel:value=1;break;default:value=0;break;}*(UInt32*)output=value;if(a->mSelector==kAudioDevicePropertyBufferFrameSize){unsigned log_count=atomic_fetch_add_explicit(&buffer_size_read_log_count,1,memory_order_relaxed);if(log_count<16)os_log(OS_LOG_DEFAULT,"Numark NS6 buffer size callback: pid %d scope 0x%x element %u => %u frames",pid,a->mScope,a->mElement,value);}return 0;
 }
 static OSStatus set_property(AudioServerPlugInDriverRef d,AudioObjectID o,pid_t p,const AudioObjectPropertyAddress*a,UInt32 q,const void*x,UInt32 n,const void*v){(void)d;(void)q;(void)x;if(o!=DEVICE_ID||!a)return kAudioHardwareUnsupportedOperationError;
     if(a->mSelector==kAudioDevicePropertyBufferFrameSize){
@@ -239,11 +242,18 @@ static OSStatus stop_io(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32
     return 0;
 }
 static OSStatus zero_timestamp(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32 client,Float64 *sample,UInt64 *host_time,UInt64 *out_seed){(void)d;(void)client;if(object!=DEVICE_ID||!sample||!host_time||!out_seed)return kAudioHardwareIllegalOperationError;NS6ZeroTimestamp value=ns6_zero_timestamp_calculate(anchor_host_time,mach_absolute_time(),timebase.numer,timebase.denom,SAMPLE_RATE);*sample=(Float64)value.sample_time;*host_time=value.host_time;*out_seed=seed;return 0;}
-static OSStatus will_do(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32 client,UInt32 operation,Boolean *will,Boolean *in_place){(void)d;(void)object;(void)client;if(!will||!in_place)return kAudioHardwareIllegalOperationError;*will=operation==kAudioServerPlugInIOOperationWriteMix;*in_place=true;return 0;}
+static OSStatus will_do(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32 client,UInt32 operation,Boolean *will,Boolean *in_place){(void)d;(void)object;(void)client;if(!will||!in_place)return kAudioHardwareIllegalOperationError;*will=operation==kAudioServerPlugInIOOperationWriteMix||operation==kAudioServerPlugInIOOperationReadInput;*in_place=true;return 0;}
 static OSStatus begin_io(AudioServerPlugInDriverRef d,AudioObjectID o,UInt32 c,UInt32 op,UInt32 frames,const AudioServerPlugInIOCycleInfo*i){(void)d;(void)i;if(o==DEVICE_ID&&op==kAudioServerPlugInIOOperationWriteMix&&frames)ns6_active_flow_record(&active_flow,frames,c,mach_absolute_time());return 0;}
 static OSStatus do_io(AudioServerPlugInDriverRef d,AudioObjectID object,AudioObjectID stream,UInt32 client,UInt32 operation,UInt32 frames,const AudioServerPlugInIOCycleInfo*i,void *main_buffer,void *secondary){
     (void)d;(void)secondary;
-    if(object!=DEVICE_ID||stream!=STREAM_ID)return kAudioHardwareBadObjectError;
+    if(object!=DEVICE_ID)return kAudioHardwareBadObjectError;
+    if(stream==INPUT_STREAM_ID){
+        if(operation!=kAudioServerPlugInIOOperationReadInput)return kAudioHardwareIllegalOperationError;
+        if(!main_buffer&&frames)return kAudioHardwareIllegalOperationError;
+        if(main_buffer&&frames)(void)ns6_usb_capture_read((float*)main_buffer,frames);
+        return 0;
+    }
+    if(stream!=STREAM_ID)return kAudioHardwareBadObjectError;
     if(operation==kAudioServerPlugInIOOperationWriteMix){
         ns6_active_flow_record(&active_flow,frames,client,mach_absolute_time());
         uint64_t callback_start_ns=io_monotonic_ns();

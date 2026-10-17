@@ -8,3 +8,11 @@ set -eu
 /usr/bin/killall coreaudiod >/dev/null 2>&1 || true
 # LaunchAgent KeepAlive reloads the newly installed bridge binary.
 /usr/bin/killall NumarkNS6MIDIBridge >/dev/null 2>&1 || true
+
+# Start the installed bridge now for the logged-in user; otherwise it waits until next login.
+CONSOLE_UID=$(/usr/bin/stat -f '%u' /dev/console 2>/dev/null || echo 0)
+if [[ "$CONSOLE_UID" =~ '^[1-9][0-9]*$' ]]; then
+    MIDI_AGENT="/Library/LaunchAgents/io.github.maurojuniorr.numark-ns6-midi-bridge.plist"
+    /bin/launchctl bootstrap "gui/$CONSOLE_UID" "$MIDI_AGENT" >/dev/null 2>&1 || true
+    /bin/launchctl kickstart -k "gui/$CONSOLE_UID/io.github.maurojuniorr.numark-ns6-midi-bridge" >/dev/null 2>&1 || true
+fi
