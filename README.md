@@ -1,9 +1,9 @@
 # 🎧 Numark NS6 driver for Apple Silicon macOS
 
 An independent driver project to keep the original Numark NS6 usable on modern
-Apple Silicon Macs. It provides four-channel audio playback through Core Audio,
-MIDI input and LED output through CoreMIDI, and a small status app for the
-device and active audio stream.
+Apple Silicon Macs. It provides four-channel audio playback and stereo capture
+through Core Audio, MIDI input and LED output through CoreMIDI, and a small
+status app for the device and active audio stream.
 
 The macOS implementation builds on the protocol and initialization work in
 [our Linux NS6 driver](https://github.com/maurojuniorr/numark-ns6-linux). That
@@ -11,22 +11,20 @@ Linux project is also still in progress. This repository adapts that shared
 hardware knowledge to macOS; it is not a port of Numark's discontinued driver
 and is not an official Numark or Ploytec product.
 
-> **Stable version: 0.2.138.** Candidate 0.2.139 adds experimental stereo
-> audio input for hardware validation; it keeps the 0.2.138 USB ownership and
-> audio-output architecture.
+> **1.0 candidate: package version 0.2.140.** It builds on the 0.2.138 audio
+> and MIDI baseline, adds the stereo capture path, and fixes MIDI Bridge
+> replacement and startup during package upgrades. It is a candidate, not a
+> formal 1.0 release. The `.pkg` has not yet been attached to a GitHub Release.
 
-## ✨ What's new in 0.2.123
+## ✨ What's in this candidate
 
-- Audio recovery no longer inserts a protective rebuffer or fade-in when the
-  queue gets low. If a USB output block is genuinely short, only its missing
-  tail is faded down from the last valid sample.
-- CoreAudio `WriteMix` diagnostics now record each client's callback frame
-  count, timing between callbacks, maximum enqueue duration, and callback
-  periods exceeded. These measurements are written to the system log to help
-  distinguish late audio callbacks from USB transfer faults.
-- The MIDI bridge LaunchAgent targets the app bundle installed by the package,
-  and the installer removes an obsolete localized app copy to avoid leaving a
-  stale bridge executable behind.
+- Adds a two-channel, 44.1 kHz capture stream decoded from the NS6 USB input
+  endpoint while an application requests input.
+- The installer upgrades the HAL driver and Status app together, unloads an old
+  MIDI Bridge before replacing its app bundle, and starts the installed bridge
+  after the upgrade.
+- Adds regression checks for capture decoding, its audio ring, USB endpoint
+  configuration, and package contents/lifecycle.
 
 ## 👨‍🔧 About the project
 
@@ -44,9 +42,18 @@ Silicon Macs running macOS 15 or later.
 - **Four-channel audio output:** 44.1 kHz, packed 24-bit audio. Output channels
   1–2 carry Master and channels 3–4 carry Headphones, so DJ software can route
   both mixes independently.
-- **MIDI controls:** the driver reads the NS6's packed USB MIDI messages and
+- **MIDI controls and LEDs:** the driver reads the NS6's packed USB MIDI messages and
   publishes a **Numark NS6** CoreMIDI input. DJ software can send MIDI back to
-  the controller's LEDs through the matching CoreMIDI output.
+  the controller's LEDs through the matching CoreMIDI output. The bridge is
+  installed with the Status app and starts in the logged-in user session.
+- **Adaptive USB audio clock:** endpoint `0x81` feedback drives the five/six
+  frame packet schedule for an exact 44.1 kHz average. The output path has
+  played multi-hour sessions cleanly on the maintainer's M1 Pro/Sequoia setup;
+  the recent 0.2.138 baseline is the known stable output build.
+- **Two-channel audio input:** the candidate exposes the NS6 capture stream at
+  44.1 kHz. Input capture worked in an earlier hardware test; this integration
+  still needs a fresh test alongside playback and MIDI before calling it a
+  stable 1.0 feature.
 - **NS6 Status app:** reports USB connection, the installed driver's version,
   firmware, audio format, and the CoreAudio buffer cycle observed for the app
   using the active audio flow.
@@ -78,21 +85,23 @@ residual host/device drift. The driver logs USB callback cadence and work
 duration, CoreAudio `WriteMix` cadence and enqueue duration, queue depth,
 packet/transfer errors, and recovery events.
 
-## ⚠️ Current limitations
+## ⚠️ What remains before a stable 1.0 release
 
-- **Experimental audio input (0.2.139 candidate):** the HAL exposes a stereo
-  44.1 kHz input stream and decodes the NS6 bulk-IN `0x86` payload while an
-  application requests capture. The endpoint was previously used as a waveform
-  drain; input was observed on hardware in an earlier build, but this port onto
-  the stable 0.2.138 USB architecture still needs hardware validation, including
-  capture while MIDI and playback are active. Treat 0.2.138 as the stable build.
-- **Hardware coverage is limited.** The current release has been stable in
-  recent sessions on the maintainer's M1 Pro/Sequoia setup; testing on other
-  systems and longer sessions is still needed to characterize rare failures.
+- **Revalidate input on this candidate.** Run microphone and line capture, then
+  test capture with playback and MIDI active at the same time. The capture code
+  is implemented and has prior hardware evidence, but this exact integration
+  has not yet had that full test.
+- **Publish the installer.** Commit `a60747b` and this candidate's source are on
+  `main`; the 0.2.140 `.pkg` is currently a local build and is not attached to a
+  GitHub Release. Build it with the command below before distributing it.
+- **Broader hardware coverage is still needed.** Testing on other Apple Silicon
+  Macs, macOS releases, DJ applications, and longer sessions remains open.
 - NS6 Status reads a firmware-version property populated by a read-only
   vendor request. The connected NS6 returned `31 01 03 02 02`, matching
   `1.0.3 (K1)` from the original Windows panel; other firmware variants have
   not been validated.
+- This project targets the original NS6 on Apple Silicon macOS 15 or later. The
+  NS6II and Intel Macs are not supported by this build.
 - The separate `tools/ns6-probe` program only reads USB descriptors. It is a
   development diagnostic, is not required by the driver, and is not included
   in the installer.
@@ -101,12 +110,21 @@ packet/transfer errors, and recovery events.
 
 ## 📥 Install
 
-Download the latest **NumarkNS6 `.pkg`** from
-[GitHub Releases](https://github.com/maurojuniorr/numark-ns6-mac-arm64/releases).
-Open the package and follow Installer. It installs the Core Audio driver,
-**Numark NS6 Status**, and the CoreMIDI bridge. Administrator authorization is
-required. Connect and power on the NS6, then select **Numark NS6** in System
-Settings → Sound → Output or in your DJ application's audio preferences.
+The 0.2.140 candidate `.pkg` is not published as a GitHub Release asset yet.
+Build it from this repository on an Apple Silicon Mac with Xcode Command Line
+Tools:
+
+```sh
+cd coreaudio
+make package VERSION=0.2.140
+```
+
+This creates `coreaudio/dist/NumarkNS6-0.2.140.pkg` from the repository root.
+Install it with macOS Installer; the installer restarts CoreAudio and briefly
+interrupts system audio. It installs the HAL driver, **Numark NS6 Status**, and
+the CoreMIDI bridge. Administrator authorization is required. Connect and
+power on the NS6, then select **Numark NS6** in System Settings → Sound or in
+your DJ application's audio preferences.
 
 In Mixxx, select **Numark NS6** for both the audio device and the controller's
 MIDI input/output. Route Master to channels 1–2 and Headphones to channels
@@ -131,7 +149,7 @@ make clock-control-fixed-test
 make usb-work-interval-regression-test
 ```
 
-To create a local installer package:
+To create a local installer package and run the package checks:
 
 ```sh
 make package
