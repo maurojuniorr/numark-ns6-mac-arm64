@@ -2,13 +2,13 @@
 
 ## Summary
 
-The original Ploytec kext includes generic capture/audio-input code, but the available NS6-specific USB capture does not show a dedicated PCM input endpoint. Do not add a CoreAudio input stream from these findings alone.
+The original Ploytec kext uses the NS6's bulk-IN endpoint `0x86` for audio capture. It is not a conventional PCM endpoint: the kext reconstructs two 24-bit sample streams from the low bit of byte lanes in each bulk block, then places them in 32-bit CoreAudio samples. A synchronized QuickTime recording from the explicitly selected NS6 input matches the reconstructed signal envelope (correlation 0.996). This is now direct hardware-capture evidence for the input transport.
 
 ## Hopper observations
 
-- `PGConfigurationDescriptor::findAudioStreamingInInterface` and `PGInterfaceDescriptor::isAudioStreamingIn` are generic Ploytec descriptor routines.
-- `PGDevice::bulkAudioRun` calls `PGDevice::setAJDMAInputChannels`; its pseudocode configures the input channel count and prepares bulk audio IRPs. `PGDevice::resumeStreaming` invokes `bulkAudioRun` together with `rtsIsocAudioRun` for some selected settings.
-- These routines prove that the Ploytec framework contains input-capable code. They do not by themselves prove that the NS6 routes microphone/line audio through that path.
+- `PGConfigurationDescriptor::findAudioStreamingInInterface` and `PGInterfaceDescriptor::isAudioStreamingIn` are generic Ploytec descriptor routines. The NS6 does not advertise a standard class-compliant PCM capture endpoint, so those routines alone did not identify the NS6 input path.
+- For the NS6, `PGDevice::bulkAudioRun` configures the input format, chooses a DMA decoder, allocates four bulk-IN IRPs, and starts reads on `m_pcInPipe`. `bulkAudioInCompletion` passes completed blocks to `bulkInpEvent`; `rtsProcessBulkIn` invokes the selected decoder before publishing frames to the shared audio ring.
+- `PGDevice::chooseDMADecoder` selects `_dmaDecode16To02At32Bit` when converting the 16-channel DMA source mode to two CoreAudio channels. Its C implementation takes the low bit from 24 bytes at offsets 0–23 and 24 bytes at offsets 32–55, assembles two signed 24-bit values, shifts them into 32-bit samples, and advances by a 64-byte source stride. The `16` in the decoder name is the DMA source-channel mode, not a 16-bit sample depth. This explains why the captured bytes look like only `0x00`/`0x01` rather than ordinary PCM.
 
 ## NS6 USB capture observations
 
@@ -22,7 +22,15 @@ Artifact: `/Users/maurojunior/Downloads/ns6_full_10min.pcapng`, USB Darwin captu
 | `0x83` | bulk | NS6 → host | 4,270 |
 | `0x04` | bulk | host → NS6 | 19,472 |
 
-Endpoint `0x81` returned 12 bytes per captured transfer, with `2c2c2c` (44-frame feedback values) followed by placeholder `aaaaaa` values. This is feedback, not a PCM capture stream. Endpoint `0x83`/`0x04` carry MIDI. Endpoint `0x02` is playback. The remaining IN endpoint `0x86` is already identified by the project protocol notes as the waveform-display bulk endpoint; its captured 10,240-byte payload is highly structured and consists largely of `0x00`/`0x01` values rather than 24-bit PCM samples.
+Endpoint `0x81` carries feedback/status traffic, not capture samples. Endpoint `0x83`/`0x04` carry MIDI. Endpoint `0x02` is playback. The earlier 10-minute capture did not correlate `0x86` to a recording, so the project protocol notes had labeled it waveform data. That interpretation is superseded by the synchronized input test below; the `0x00`/`0x01` byte values are expected by the Ploytec decoder.
+
+### Synchronized NS6 input capture (2026-10-14)
+
+Artifacts: `/Users/maurojunior/Downloads/mic2.pcapng` and `/Users/maurojunior/Downloads/mic2.m4a`. QuickTime's input source was explicitly set to **Numark NS6**. The capture shows bulk-IN endpoint `0x86` beginning when QuickTime opens the input. It contains 10,240-byte completions; all captured payload bytes are `0x00` or `0x01`.
+
+Applying the Ploytec two-channel decoder layout to those payloads reconstructs 1,721,760 frames over 39.051 seconds (about 44.09 kHz from first/last completion timestamps; transfer-queue boundaries make this an estimate, not a clock measurement). The reconstructed signal's 10 ms RMS envelope matches the QuickTime recording at 0.996 correlation, with the recording beginning about 7.61 seconds after the first captured input block. The correlation remains 0.991 when low-level bins are excluded, so shared silence does not explain the match. Together with the kext's decoder and bulk-IRP path, this confirms that `0x86` carries the NS6's audio input. The unusual binary-looking payload is a bit-lane encoding that the Ploytec decoder expands; it is not ordinary 16/24-bit PCM on the wire.
+
+The same trace captures the driver's mode negotiation immediately before streaming: vendor control IN request `bRequest=0x49`, `wLength=1` returns `0x12`; the driver then sends vendor control OUT `bRequest=0x49`, `wValue=0x0032`, with no data stage. This matches `PGDevice::setAJDMAInputChannels`, which reads one mode byte, updates its flags, and writes the selected mode back. Bulk-IN reads on `0x86` begin immediately after this setup.
 
 ## Descriptors from the connected NS6
 
@@ -38,19 +46,31 @@ On 2026-10-06, the read-only `tools/ns6-probe` queried the physical NS6 (`15e4:0
 | 1 | 1 | `0x81` | isochronous IN | 64 |
 | 1 | 1 | `0x86` | bulk IN | 512 |
 
-No alternate setting exposes another input endpoint. Any host capture would have to use `0x81` or `0x86` in a mode that was not identified in the available trace. The observed payloads identify `0x81` as clock feedback and `0x86` as structured waveform data during that session.
+No alternate setting exposes another input endpoint. The input therefore shares an existing endpoint: the Ploytec kext uses bulk-IN `0x86`; `0x81` remains the feedback/status endpoint.
 
-## Stop/go result
+## Experimental implementation status (2026-10-14)
 
-The capture does not contain a separate NS6 audio-input endpoint or recognizable PCM input payload. The Ploytec input functions are generic, and there is no NS6-specific descriptor/payload evidence tying them to the physical inputs. Therefore Task 1's stop/go gate is **not met**: do not publish an input device or treat `0x81`/`0x86` as capture.
+The arm64 driver now has a first experimental capture path in the working tree:
 
-To resolve the mismatch with the Windows panel's “Inputs: 2”, a useful next artifact would be a USB capture from the original Windows driver while recording known audio fed into the NS6's physical input. Compare IN payloads with the input silent and with a 440 Hz signal. That would show whether the Windows driver activates another alternate setting or repurposes an existing endpoint.
+- It reads the current input-mode byte with vendor request `0x49`, then selects the observed two-channel mode (`0x32`) before streaming.
+- It decodes the two 24-bit bit-lanes from each 64-byte source stride and places stereo float frames in an SPSC capture ring.
+- It exposes a separate two-channel CoreAudio input stream, ID `4`, while preserving the existing four-channel output stream, ID `3`.
+- CoreAudio `ReadInput` callbacks consume decoded frames; if the capture ring is empty, the remaining requested frames are zero-filled.
+- EP `0x86` polling is demand-gated while a MIDI session is active. This avoids continuously claiming the endpoint in MIDI-only use, based on prior observations that continuous reads could interrupt MIDI. If there is no MIDI session, the existing endpoint drain behavior remains active.
+
+The first hardware test succeeded on 2026-10-14. QuickTime recorded `/Users/maurojunior/Desktop/micns6.m4a` through the NS6 input on the first attempt. The file is stereo AAC at 44.1 kHz, 12.72 seconds long; decoded audio has a peak of about −7.66 dBFS and RMS of about −30.9 dBFS. In 50 ms windows, none were digital silence (minimum RMS `9.67e-5`). This confirms that the experimental HAL input stream reaches an application and carries nonzero audio.
+
+The user then confirmed that the recording contains both the microphone and computer playback. This matches the NS6's documented recording route: the VirtualDJ NS6 guide says the interface's stereo record input captures the Master output, including the microphone and other analogue sources; it also notes that the mic/line inputs are not exposed as independent software inputs. The current driver has distinct HAL input/output streams and does not mix them in software; the combined signal is therefore the NS6's record/mix bus. We should describe this stream as a stereo record mix, not an isolated microphone input. See [VirtualDJ's NS6 advanced audio setup](https://www.virtualdj.com/manuals/hardware/numark/ns6/advanced.html).
+
+In the first combined input/Mixxx playback/MIDI test, the user heard a few pops while an external LINE connection and a microphone were both connected. MIDI controls remained responsive. Removing the LINE connection made playback clean. This points to the LINE source or its routing/level as the trigger in that test, rather than a demonstrated USB/MIDI failure; the exact electrical or routing cause is not established. The driver was installed as 0.2.156 during this observation.
+
+The driver and package compile, the decoder/ring tests pass, and the package is signed at the bundle level. Remaining hardware checks are channel correctness, sustained callback continuity, and simultaneous input with MIDI and playback. Independent MIC/LINE capture is not expected from this two-channel record-mix path. In particular, simultaneous input plus MIDI remains unverified because earlier tests found that continuous EP `0x86` reads could interrupt MIDI. The package is experimental, unsigned as a macOS installer package, and must not be treated as a stable release.
 
 ## Limits
 
-- The pcap shows one captured configuration/session; it does not exhaust every possible alternate setting.
-- The descriptors rule out an undiscovered alternate-setting endpoint on this hardware, but cannot rule out a different payload mode on an existing endpoint.
-- The Windows panel's input count establishes software-reported channels, not the USB transport or that the NS6 sends those physical inputs to the host.
+- The 2026-10-14 input capture was one selected-source recording; it does not yet separate MIC and LINE routing or establish whether both can be captured simultaneously.
+- The measured rate is estimated from USB completion timestamps and queued transfer sizes, not from a hardware clock counter.
+- The QuickTime audio is lossy AAC; envelope correlation confirms matching activity, while bit-exact audio comparison is not expected.
 
 ## Ghidra pass 2: Ploytec isochronous feedback and packet sizing (2026-10-12)
 
@@ -258,3 +278,433 @@ With the capture cadence above, the queue depths correspond to about 12 ms of au
 The observer then validates each extracted byte against its expected feedback range. In the ordinary path, out-of-range values are replaced by the next predicted pattern value while the history cursor advances. In full-frame mode, values outside a narrow ±2-frame window invalidate lock and fall back to the nominal eight-packet pattern. This is a resilient predictor around the selected byte, not a decoder that averages all three bytes in the report.
 
 Together, these four passes clarify endpoint choice, descriptor expansion, schedule coordinates, and payload decoding. They do not establish that a feedback callback delay caused our driver's audible artifacts; a useful next measurement would need the endpoint descriptor's actual `bInterval` plus timestamped completion and output-deadline data from the same run.
+
+## Ghidra pass 19: MIDI IN is armed with a queue, and error completions are asymmetric (2026-10-13)
+
+The x86_64 Ploytec kext `NumarkNS6Audio` 3.3.11 has two MIDI-IN implementations visible in the disassembly, so their behavior should not be conflated:
+
+- `PGDevice::onStreamingStarted` starts both the `USBMidiDevice` path and `AJ::streamingStarted`. The latter initializes 16 asynchronous reads through `AJ::bulkRead` on its MIDI-IN pipe (and uses the same async completion machinery for its paired MIDI-OUT pipe). On a successful IN completion, `AJ::inAsyncCompletionRoutine` invokes the selected input parser and immediately calls `bulkRead` to submit another read. On an unsuccessful completion, it only logs `kIOUSBTransactionTimeout` when that is the reported status, retires the completed request, and decrements its outstanding counter; it does not call `bulkRead` on that path. Thus a failed read is not directly replenished by that callback. Other pending reads remain independent, and the static analysis does not show an automatic retry from this failure branch.
+- The separate `USBMidiDevice::start` marks MIDI active and submits three reads from its four-slot request-block pool. Its `readComplete` callback only marks the block free; it does not itself process data or requeue that block. The decompilation shows this path is started and stopped alongside audio streaming, but does not establish that it is the active source for the observed NS6 MIDI events. The `AJ` route is the clearer continuous parser/queue path in this binary.
+- `PGDevice::onStreamingStopped` stops the USB MIDI device and `AJ::streamingStopped` aborts both pipes. This ties the vendor driver's MIDI transport lifetime to the audio streaming lifecycle: it is started when CoreAudio streaming starts and aborted when streaming stops.
+
+This makes the user's “MIDI input waits for messages” theory plausible only in a limited way. An idle endpoint can simply leave asynchronous reads outstanding; silence by itself is not shown to reset audio or to be an error. But if an IN request completes with a timeout/error, this callback does not replenish that slot, so repeated errors could shrink the outstanding-read queue until another stream start. The code does not show that a MIDI-IN error triggers the audio recovery path or causes an audible glitch. We need timestamp-correlated USB completion status, number of pending MIDI reads, MIDI traffic, and audio transfer errors to establish a causal link. The observation is static analysis of the legacy Intel kext; it does not prove the same behavior exists in the current Apple Silicon driver.
+
+## Ghidra pass 20: MIDI data delivery is separate from audio recovery (2026-10-13)
+
+I followed the successful MIDI-IN completion beyond the USB callback to the client-facing queue:
+
+- The selected `inACR_*` parser calls `MidiIO::putFrame` with the received bytes. When bytes were accepted, it signals `MidiUserClientNUMARKNS6::triggerClient`, which only signals a semaphore. That is the event-delivery wake-up to the MIDI client; the parser does not call `stopStreaming`, restart an audio pipe, or manipulate the audio frame/clock state in the inspected path.
+- The bulk MIDI reader maintains 16 `BulkRB` slots. `AJ::getIn` selects one free slot; `AJ::bulkRead` zeroes its buffer, submits an asynchronous read, and increments the outstanding-operation counter. Successful completion parses the bytes and submits a replacement read. A failed completion releases the slot and decrements the counter but does not requeue it. This is a queue-depth degradation path, not an explicit audio recovery path.
+- `PGDevice::onStreamingStarted` is the common lifecycle hook: it starts `USBMidiDevice` and then `AJ::streamingStarted`; the latter selects a parser from the device/configuration and arms the 16 reads. `onStreamingStopped` stops the MIDI helper and aborts the `AJ` IN/OUT pipes. So MIDI transport is coupled to the *lifetime* of the audio stream in this legacy driver, while the data parser's successful-event path remains separate from audio scheduling.
+
+The most defensible reading of the “MIDI waiting” theory is therefore: **missing MIDI messages alone are not shown to harm audio; repeated MIDI-IN transfer errors could silently shrink the receive queue, but the inspected code does not connect that condition to audio glitches.** A new capture should distinguish an idle request that remains pending from one that completes with timeout/error, and correlate the latter with audio endpoint completions and the USB LED. This pass is based on static x86_64 disassembly and does not establish the runtime's exact timeout behavior or prove that the current ARM64 driver has the same coupling.
+
+## Ghidra pass 21: stream shutdown stops MIDI first; duplicate stop calls are guarded
+
+I decompiled `PGDevice::stopStreaming(bool)` (`0x15c16`), `PGDevice::onStreamingStopped` (`0x12130`), `USBMidiDevice::stop` (`0x2710e`), `USBMidiDevice::start` (`0x2706c`), and `AJ::streamingStopped` (`0x02ee0`) in the existing read-only Ghidra project:
+
+- `stopStreaming` calls `USBMidiDevice::stop` before clearing the streaming flag and aborting/cancelling the audio and USB pipes. It then calls `AJ::streamingStopped`, waits 100 ms when requested, and invokes `onStreamingStopped`; that callback calls both MIDI stop routines again.
+- The apparent duplicate calls are guarded and idempotent. `USBMidiDevice::stop` checks its active byte, clears it before aborting the MIDI IN/OUT pipes and cancelling used request blocks, and returns immediately on a second call. `AJ::streamingStopped` likewise checks and clears its active state before aborting its two pipes, so the later callback does not repeat that abort.
+- On startup, `onStreamingStarted` starts `USBMidiDevice` and then calls `AJ::streamingStarted`; the latter initializes its parser and posts 16 asynchronous bulk reads. The secondary helper starts three MIDI IN reads from its pool.
+
+This gives a concrete vendor lifecycle reference for interpreting MIDI aborts around audio-stream shutdown: stopping audio intentionally stops both MIDI paths and aborts their outstanding requests; some aborted completions are therefore expected during teardown. The double call itself is not evidence of a bug because both paths have active-state guards. This static x86_64 kext analysis does not show that the current Apple Silicon driver follows the same ordering, nor does it explain a preceding `kIOReturnNotResponding`/pipe-stall or establish that MIDI teardown caused audio underruns. The user's 21:27–21:29 runtime observation should be treated as a stream stop/restart capture, not as a continuous-playback Mixxx MIDI test.
+
+## Ghidra pass 22: stop is a shared lifecycle path, not a unique “app closed” event
+
+I traced every reference to `PGDevice::stopStreaming` (`0x15c16`) and decompiled `PGKernelDeviceNUMARKNS6::cancelMidiRB` (`0x1e5a6`) plus `USBMidiDevice::requestMidiIn` (`0x270c0`):
+
+- `stopStreaming` is reached from normal lifecycle/configuration paths (`suspendStreaming`, `setSelectors`, `onPrepareNewConfig`, `unconfigureDevice`, `usbApplyInterfaceSelector`, `terminate`, and `systemSleep`) **and** from error callbacks such as feedback failure, late isochronous OUT scheduling, audio IN errors/configuration changes, and bulk/interrupt IN/OUT errors. Therefore a stream stop in the Ploytec path is not by itself proof that the application requested closure; the initiating call site matters.
+- Before stopping the audio worker and its rings, `stopStreaming` invokes `USBMidiDevice::stop`. That helper aborts MIDI IN/OUT pipes and walks up to four request blocks for each direction. For every non-null block still marked in use, `cancelMidiRB` sets a cancellation flag, sleeps **50 ms**, and clears the flag only if the block is no longer marked in use. Those waits are sequential in the decompiled loop; the theoretical code-path sum is up to eight 50 ms waits, though this is not a measured shutdown time and not every slot must be active. `stopStreaming(true)` also has the separate 100 ms post-abort sleep already documented in pass 9.
+- `requestMidiIn` submits a read only while the helper's active flag is set and an IN pipe exists. Thus after the stop flag clears, this path will not replenish an input request; the stream-start hook re-arms reads later.
+
+This confirms that the vendor driver intentionally couples MIDI request cancellation to stream shutdown, and that error-driven stream recovery uses the same shutdown routine as ordinary suspend/close. For our 21:27 observation, the user's report establishes that Mixxx was closed and the NS6 LED went out and returned; the old kext's call graph shows why the same visual stop/restart symptom could also be reached through an error path, but cannot classify the current driver's event. The 50 ms cancellation wait is a Ploytec implementation detail, not a recommendation to copy into our driver. Exact trigger identification still requires the current ARM64 driver's own stop/restart reason telemetry or USB/IOKit logs around the transition.
+
+## Ghidra pass 23: the secondary MIDI helper appears unbound; AJ owns the concrete pipes
+
+I followed the helper's request-block lifecycle and then checked its configuration caller:
+
+- `USBMidiDevice`'s constructor initializes its MIDI IN/OUT pipe pointers to null. `PGDevice::findInterfacesInConfig` calls `AJ::assignPipes` with the device, which selects concrete interrupt/bulk MIDI pipes for AJ. It also calls `USBMidiDevice::assignPipes`, but the analyzed function body is an empty return and does not assign either helper pipe.
+- `USBMidiDevice::configurationDone` allocates its four IN and four OUT request blocks only when the respective pipe pointer is non-null. `start` sets its active flag and tries three `requestMidiIn` calls, but each request checks for a non-null IN pipe before selecting a block and submitting a read. In the traced NS6 configuration path, the pointers were not populated, so the source does **not** establish that those three helper reads are actually submitted.
+- The concrete AJ path is different: `AJ::assignPipes` obtains the selected interface's bulk OUT pipe and interrupt IN pipe, falling back to bulk IN when needed. `AJ::streamingStarted` configures the parser and submits 16 bulk reads. This is the path with demonstrated pipe assignment and the successful event parser described in passes 19–20.
+- The helper's asynchronous `readComplete` ignores the completion status and only marks its `MidiRB` free; it neither parses MIDI bytes nor reposts a read. Its `read` call binds that callback directly. This behavior is consistent with a dormant/unbound auxiliary path in this NS6 configuration, not a second proven event stream.
+
+This corrects the tentative wording in pass 19 that the helper “submits three reads”: its `start` loop requests three reads conditionally, but the traced pipe assignment leaves the conditions unsatisfied. The reliable static conclusion is that AJ owns the configured MIDI pipe path; whether any other runtime code patches the helper pointers remains unproven. Consequently, the current driver's post-close MIDI recovery logs should not be explained by assuming the old kext had two live receive queues competing for the same endpoint.
+
+## Ghidra pass 24: identify which error callbacks can stop the vendor stream
+
+I re-imported the original x86_64 `NumarkNS6Audio` binary into Ghidra 12.1.4
+and traced the stop calls from the completion callbacks, rather than grouping
+all input errors under “MIDI/USB.”
+
+- The concrete MIDI path is `AJ::bulkRead` → `AJ::inAsyncCompletionRoutine`
+  (`0x3d64`). On a failed completion it only logs the timeout status when the
+  status equals `kIOUSBTransactionTimeout`, releases the `BulkRB`, and
+  decrements AJ's outstanding-operation counter. Only the success branch
+  parses data and submits a replacement read. There is no call from this
+  callback to `PGDevice::stopStreaming`, `handleStreamBroken`, or the feedback
+  clock path. Therefore a failed AJ MIDI read can shrink MIDI receive depth,
+  but this callback does not itself stop or restart audio.
+- The callbacks that do call `stopStreaming` are distinct `PGDevice` audio
+  request handlers: `bulkInpEvent(AudioBulkIRP*)`,
+  `bulkOutEvent(AudioBulkIRP*)`, `interruptInpEvent(AudioInterruptIRP*)`, and
+  `interruptOutEvent(AudioInterruptIRP*)`. Their inputs are audio IRP types;
+  seeing a stop call in one of them is not evidence that AJ's MIDI completion
+  took that path. They mark/report `STC_STREAM_BROKEN` for applicable errors.
+- The common stream stop still shuts down the MIDI helpers as part of teardown.
+  That means MIDI requests may be aborted *because* the audio stream is
+  stopping. A MIDI error logged at the same time as an app-close transition
+  could consequently be a teardown side effect; timestamp proximity alone
+  cannot establish that it initiated the stop.
+
+This narrows the Ploytec comparison: the inspected binary has no direct
+MIDI-IN-error → audio-stop edge on the live AJ path. It does have audio IRP
+error → stream-stop edges, after which MIDI is torn down with the stream. This
+is static evidence for the legacy Intel kext only; it does not establish the
+cause of the Apple Silicon driver's LED blink. To establish that, the live
+driver needs a same-timestamp reason for each pause/recovery/USB-presence
+transition and a distinction between its MIDI completion errors and audio
+transport callbacks.
+
+## 0.2.143 idle LED capture: delayed completion handling and long async submit calls (2026-10-14)
+
+The user confirmed this capture was recorded with 0.2.143 installed. The saved
+`ns6-idle-led.log` filter omitted the new `USB OUT slow cycle` message, so the
+matching interval was queried from the macOS unified log. The capture covered
+roughly 00:05:20–00:06:55 while the stream reported `paused=1` and the transport
+was still submitting idle PCM:
+
+- 152 output cycles exceeded the diagnostic's 5 ms threshold. Every matching
+  event had `paused=1`, `result=0x00000000`, and no USB transfer/packet error.
+- `LowLatencyWriteIsochPipeAsync` took as long as **1,409,365 μs (1.409 s)**
+  wall time while the calling thread accumulated only **43 μs** of CPU. Other
+  slow calls included 595 ms, 207 ms, and 177 ms. The USB API returned success
+  even after these long waits.
+- The time from entry to the output completion callback until the next fill
+  began reached **316,668 μs (316.7 ms)**. The fill itself remained short (up to
+  4.7 ms wall time), so the delay is before the PCM fill; this measurement alone
+  does not identify which operation inside the completion handler accounts for
+  it.
+- The output callback-gap telemetry reached **1.44 s**. Feedback callback
+  cadence reached **253.9 ms**, consistent with both completion paths being
+  delayed while sharing the worker's run loop. This correlation does not prove
+  whether the delay originates in the run loop, logging/handler work, the IOKit
+  async-submit call, or a lower USB-host scheduling layer.
+- USB transfer errors, packet errors, and short packets stayed at zero. The
+  reported underruns remained at 6 events / 32 frames across the captured
+  health summaries rather than increasing during the idle portion.
+
+This is the first direct runtime evidence of two distinct delay points during
+idle operation: callback-to-fill handling and the nominally asynchronous IOKit
+submit call. The next diagnostic should time the completion handler's internal
+stages and CPU time separately, especially its logging/telemetry section, while
+retaining the existing submit wall/CPU pair. Avoid attributing the LED blink to
+USB packet errors: none were recorded in this run. The capture does show that
+the transport callbacks and submissions can be delayed severely despite
+successful IOKit return codes.
+
+## 0.2.144 repeat Opera-close capture: delays reproduce on both cycles (2026-10-14)
+
+The next capture was made with 0.2.144 installed after the user opened and
+closed Opera twice. Unified-log records cover 00:11:24–00:12:18 and identify the
+new build by its completion-handler diagnostics:
+
+- There were 94 `USB OUT slow cycle` records in the interval; all were in
+  `paused=1` and returned `0x00000000`.
+- The slowest `LowLatencyWriteIsochPipeAsync` call took **391,646 μs (392 ms)**
+  with **398 μs** of thread CPU. Other examples were 177 ms, 135 ms, and 89 ms.
+- The completion-handler pre-submit interval reached **115,045 μs (115 ms)**,
+  with only **258 μs** of thread CPU. The gap between completion callbacks
+  reached **457,868 μs (458 ms)**. This confirms a real wait/descheduling period
+  in the handler path in addition to the time spent inside the submit call.
+- The saved live-stream file omitted the new diagnostic names, but the unified
+  log contained 5 detailed completion-handler entries and 94 slow-cycle entries.
+- USB transfer and packet errors remained zero. The health counter stayed at
+  **24 underruns / 125 frames** through the captured interval; it did not rise
+  during the idle cycles.
+
+The submit-side delay is reproducible across the 0.2.143 and 0.2.144 captures.
+To separate its cause from callback work, the next build times the callback-gap
+logging call and the periodic health/telemetry logging block independently,
+including wall and thread-CPU time. This still does not prove that either delay
+caused a particular physical LED blink, but it rules out USB transfer-error
+recovery and heavy PCM filling as explanations for these captured stalls.
+
+## 0.2.145 Opera-close capture: per-gap logging stalls the USB callback (2026-10-14)
+
+The user installed 0.2.145 and repeated opening/closing Opera. Unified-log
+records from 00:15:45–00:17:35 contain 67 slow-cycle entries, 83 callback-gap
+entries, and 3 instrumented completion-handler entries. Every slow cycle was
+still `paused=1` and had a successful IOKit result.
+
+The most diagnostic handler entry measured **56,980 μs (56.98 ms)** from
+completion entry to the next submit, with **134 μs** of thread CPU. Its callback
+gap `os_log` call alone took **56,968 μs (56.97 ms)** and **127 μs** of CPU. This
+accounts for essentially the entire measured handler delay: the detailed log
+call itself is blocking the USB event thread and can amplify the LED/callback
+instability. The periodic health/telemetry block was not involved in these
+slow-handler samples.
+
+The IOKit submit stall remains a separate issue: the longest call in this
+capture was **131,401 μs (131 ms)** wall time and **142 μs** CPU. The fill took
+only 3 μs wall/CPU in that event. There were no USB transfer or packet errors,
+and the underrun counter remained 24 events / 125 frames during the interval.
+
+The next build removes per-event callback-gap, slow-cycle, and handler logging
+from the timing-sensitive path while retaining the existing periodic aggregate
+metrics. This tests whether diagnostic logging itself is causing the repeated
+callback stalls; it does not assume that this alone explains the independent
+long IOKit submit calls.
+
+## 0.2.146 Opera pause/close capture: MIDI endpoint failures alongside delayed audio callbacks (2026-10-14)
+
+The user reported frequent USB LED flashing and audible audio glitches with
+0.2.146 installed. The saved `ns6-idle-led.log` covers approximately
+00:22–00:23 and does not include MIDI messages in its live-stream predicate;
+MIDI failure counts below came from the accompanying unified-log inspection.
+
+- Audio health stayed at **24 underruns / 125 frames**, with zero USB transfer
+  errors, packet errors, or short packets. The count did not increase in this
+  capture, so it does not document a new software-counted underrun coincident
+  with the user's audible glitches.
+- Clock feedback stayed near 44.1 kHz. Around the Opera pause/close transition,
+  the feedback reader accumulated additional short/out-of-range samples while
+  the PCM queue reached zero; feedback polling continued.
+- Aggregate timing reached **57.8 ms** for
+  `LowLatencyWriteIsochPipeAsync`, **87.3 ms** for output frame-to-callback
+  dispatch lag, and **58.2 ms** for feedback frame-to-callback dispatch lag.
+  These are host-side delays despite successful OUT/feedback transfer status.
+- MIDI IN logged `kIOReturnNotResponding` and `kIOUSBPipeStalled` failures in
+  bursts around the audio pause and Opera client removal. The four-read queue
+  reached **0/4** in flight, then the recovery worker cleared the input-pipe
+  stall and restored reads. Thus the LED observation coincides with actual MIDI
+  transport interruptions, not only delayed audio telemetry.
+
+Source inspection shows audio isochronous OUT and MIDI bulk IN/OUT use the same
+interface-0 `IOUSBInterfaceInterface` object and its async event source/run loop.
+MIDI stall recovery runs on a separate writer thread and clears the MIDI input
+pipe specifically; it does not call the audio restart path or clear the audio
+OUT pipe. The shared callback/run-loop domain makes MIDI completion/error
+handling a plausible contributor to delayed audio callback servicing, while
+the pipe-specific recovery and unchanged audio error counters argue against
+claiming a direct audio-transfer failure. The log does not establish that MIDI
+errors caused the audible glitches or the LED flashing.
+
+Next diagnostic: capture a unified log that includes MIDI completion/recovery,
+audio callback/submit timing, audio health, and exact user-noted LED/glitch
+timestamps in one interval. If a new build is warranted, first reduce the MIDI
+recovery log volume to periodic aggregates while retaining counters and
+recovery outcomes; this tests the shared-run-loop/logging hypothesis without
+changing endpoint recovery behavior.
+
+## 0.2.147 diagnostic change: throttle MIDI error logging
+
+To test whether synchronous MIDI error logging in the shared interface run loop
+amplifies callback delays, error detail is now emitted at most once per five
+seconds globally. Per-slot/per-class error counters, pipe-stall clearing,
+retries, and read resubmission are unchanged. This is a diagnostic isolation
+change, not a claim that logging caused the audio glitch. The MIDI recovery
+unit tests and full `make test` suite pass; package creation and code-signature
+verification also pass. Hardware playback and LED behavior remain unverified
+until the user tests 0.2.147.
+
+## 0.2.147 first live capture: underrun counter rises after stream resume (2026-10-14)
+
+The installed driver bundle reports version 0.2.147. The supplied
+`ns6-idle-led.log` covers 00:27:40–00:29:23, but its predicate excludes MIDI
+error/recovery messages, and the live stream reports 68 dropped messages.
+Therefore this capture cannot verify whether the new MIDI error-log throttle
+was effective.
+
+- Audio health started at **8 events / 41 frames**, rose to **9 / 47** by
+  00:27:59, and remained there while paused. At 00:29:14.293 Opera resumed the
+  audio stream; by 00:29:22.287 the count had risen to **27 / 141** (18 new
+  events and 94 frames in about eight seconds).
+- USB transfer errors, packet errors, and audio OUT short packets remained at
+  zero. Thus the health-counter increase is a host-side queue/underrun signal,
+  not a reported failed USB OUT transfer.
+- Feedback polling continued near 44.1 kHz, though cumulative feedback short
+  packets and out-of-range samples rose during this longer capture. The audio
+  PCM queue was empty while paused and refilled after the stream resumed.
+
+This is a new measurable audio problem on 0.2.147 around Opera's resume
+transition. It does not establish that the user heard each counted underrun,
+or that MIDI recovery caused them. The next capture must include MIDI error
+and recovery messages in the same log stream; this one can only establish the
+audio-side timing and counters. Do not treat the current result as evidence
+that throttling MIDI logs fixed the physical LED flashing or audible glitches.
+
+## 0.2.147 silent Opera comparison: no new audio underruns while idle (2026-10-14)
+
+The user then captured approximately 00:31:59–00:33:54 with Opera open but no
+audio playing. The stream remained in silence/paused state with the PCM queue
+at zero. Opera CoreAudio clients were added and removed, but the capture
+contains no `audio stream resumed` transition.
+
+- The health counter remained at **28 events / 147 frames** throughout this
+  capture; no new underruns, USB OUT transfer errors, packet errors, or OUT
+  short packets appeared.
+- Feedback polling continued around 44,098.3–44,099.8 Hz. Its cumulative
+  short/out-of-range feedback counts increased, but this did not coincide with
+  a rise in the audio underrun counter during the silent interval.
+- The capture filter still excluded MIDI recovery messages and reported 29
+  dropped live-stream messages, so MIDI behavior cannot be compared here.
+
+Together with the earlier resume capture, this narrows the measurable audio
+issue to the active-flow/resume transition: silent Opera presence and its
+CoreAudio client churn did not add underruns, while the prior capture added 18
+short underruns after audio resumed. It does not yet identify the cause of the
+physical LED behavior because the log contains no timestamped LED signal, nor
+does it show whether MIDI endpoint recovery coincided in this silent run.
+
+## 0.2.147 short MIDI-only capture: no logged MIDI errors, but audio queue active (2026-10-14)
+
+The user captured 00:36:59.638–00:37:26.262 with MIDI active and no audible
+program material. The filtered file contains 30 driver records and no dropped
+message markers. No MIDI input failure or recovery message appears in this
+27-second interval. Since event-success messages are not logged, this does not
+prove that MIDI packets/events were received; it only shows no logged MIDI
+transport error/recovery during the short sample.
+
+The audio-health queue was **4,257**, **4,663**, then **4,025 frames** in the
+three summaries. This is unlike the previous silent-Opera capture, where the
+queue stayed at zero, and means the driver still saw an active CoreAudio PCM
+flow (or retained queued PCM); the capture has no pause/resume transition to
+identify the client. Therefore this is not yet a clean MIDI-only/USB-idle
+baseline despite no audible playback. The underrun counter stayed at 48 / 250
+frames during the capture, with no USB OUT/packet errors. Clock feedback was
+near 44.1 kHz. A longer MIDI-only test should first confirm the active CoreAudio
+client or wait until the queue reaches zero, then capture MIDI and health logs
+together.
+
+The user clarified that the earlier 00:36 capture still had a track loaded in
+the deck. A new capture at 00:39:06.616–00:39:38.360 was made with no audio
+playing and only NS6 controls being moved. It contained no MIDI error/recovery
+logs, no dropped messages, and the audio-health count remained **48 / 250**.
+The PCM queue nevertheless remained around **3,775–4,464 frames**, so the driver
+was still processing a silent/live CoreAudio flow; “no sound playing” should
+not be interpreted as “no active audio client.” Clock feedback stayed at
+44,100 Hz with no additional short/out-of-range counts in the shown interval.
+This distinguishes the control-only/no-program-material state from the prior
+track/resume test: no new underruns were measured during this short control
+activity sample.
+
+## Client-close LED transition: prioritize the audio idle payload (2026-10-14)
+
+The user clarified the reproducible pattern: the NS6 USB LED stays steady while
+Mixxx or Opera is open, whether the client is producing audio or silence. The
+instability begins when the client closes and then persists. Sending MIDI
+controls does not reproduce the blink, so MIDI traffic is no longer the lead
+hypothesis for this symptom.
+
+This points to the final CoreAudio client's stop transition. In `NS6HAL.c`,
+when the final I/O client stops, the HAL pauses USB output and discards queued
+PCM while keeping the USB transport running. In `NS6USB.c`, paused output is
+then zero PCM (apart from the one-time standby prime at transport startup).
+That differs from an open-but-silent client, which continues submitting live
+PCM. The timing is consistent with an idle-payload/device-state interaction,
+but does not prove causation.
+
+Built diagnostic package `NumarkNS6-0.2.148.pkg` with
+`NS6_IDLE_PCM_KEEPALIVE=1`. It keeps the existing one-LSB four-channel PCM
+pattern active while output is paused, without changing active audio, MIDI, or
+clock behavior. This is an A/B test of the final-client-close hypothesis, not
+a confirmed fix. Hardware result is pending.
+
+## Gregory's USB LED finding vs. our MIDI output shutdown path (2026-10-14)
+
+Gregory's `NOTES/led_findings.md` separates two behaviors: with the ISO keepalive
+still running, pausing host MIDI writes made the USB LED go dark; resuming MIDI
+writes brought it back. A separate earlier flashing observation was later
+attributed to an unpaced MIDI output loop. This makes the LED an activity
+indicator in those tests, not a direct USB-link or audio-clock measurement.
+
+The current driver has a potentially relevant output burst. The user-session
+MIDI bridge recognizes the private SysEx heartbeat `F0 7D 4E 53 36 48 F7`;
+after a received heartbeat goes quiet for 2 seconds, it sends a blackout sweep:
+815 MIDI messages (CC 0..0x51 and Note Off 0..0x50 on channels 0..4), batched
+into 63 UDP reports with no pacing in the bridge. The HAL-side USB writer then
+drains the queue with successive `WritePipe` calls. This could create a brief
+LED activity burst near client shutdown if the client had been sending that
+heartbeat.
+
+However, the installed Mixxx controller script and XML were searched and do
+not contain that heartbeat signature, so the bridge timeout path is not yet
+shown to run in the user's Mixxx case. The other blackout sweep is called by
+`ns6_midi_stop()` during USB transport cleanup; ordinary final-client
+`stop_io()` only pauses audio and discards PCM, and the existing lifecycle
+analysis says it leaves the transport open. Therefore neither blackout path is
+currently proven to explain Opera's close-time behavior or a persistent blink.
+The remaining differentiating evidence is whether outgoing USB MIDI writes
+occur at the observed blink, and whether the blink lasts only through a burst
+or continues after writes stop. The 0.2.148 idle-PCM package does not test this
+MIDI-output hypothesis and should be held pending that check.
+
+The next package is a logging-only diagnostic, **0.2.149** (normal zero-PCM
+idle configuration). It logs when the bridge first sees the private heartbeat,
+aggregates host-to-device MIDI report/byte counts once per second, records a
+heartbeat-timeout blackout and its report count, and records the count,
+failures, and duration of the HAL transport-cleanup blackout. It does not add
+delays, change packet contents, or alter the audio idle payload. The complete
+`make test` suite and package build passed; the production USB work-interval
+regression and ad-hoc code-signature checks also passed. This build is intended
+to answer whether a MIDI output burst or a true transport cleanup coincides
+with the close-time LED symptom. It has not been tested on hardware yet.
+
+## LED blink correlates with MIDI bulk-IN pipe recovery (2026-10-14)
+
+The user reports that every observed USB-LED blink coincides with MIDI pipe
+stall/recovery messages. In the 01:06 capture, the MIDI input reader on bulk
+endpoint **0x83** repeatedly entered recovery immediately before the reported
+blink interval. `ClearPipeStallBothEnds` took **179,926 us** once; other clears
+in the same burst completed in sub-millisecond time. A clear was requested
+while **3 of 4** asynchronous reads were still in flight. The log then shows
+only the triggering slot resubmitted, followed by recovery/resubmission of the
+other three slots.
+
+This sequence matches the IOKit SDK contract: `ClearPipeStallBothEnds` is
+equivalent to `ClearPipeStall`, which clears the endpoint halt/data-toggle and
+returns outstanding asynchronous transactions so their callbacks run. Our
+current MIDI recovery handles the triggering read per slot, while the other
+in-flight reads re-enter recovery as collateral callbacks. This can create a
+burst of read cancellations and resubmissions around one endpoint stall. The
+user's LED correlation makes EP 0x83 recovery the leading explanation for the
+blink; it is not yet proven that the recovery call itself causes the physical
+LED behavior or that it is the only cause.
+
+The separate 0.2.150 prebuffer test addresses the short audio queue underruns
+on flow resume. It does not change MIDI recovery and is not an LED fix. The
+0.2.151 test build coordinates stall recovery endpoint-wide: it quiesces the
+read callbacks, waits for outstanding requests to drain, clears EP 0x83 once,
+and then restores the four read slots as a group. Expected callbacks from the
+clear are suppressed instead of starting a second per-slot recovery. This is
+hardware-unverified; the test should confirm MIDI controls recover, the LED no
+longer blinks in response to the cascade, and no new audio errors appear.
+
+## Opera close/reopen capture: resume underruns and short startup prefill (2026-10-14)
+
+In the user's latest capture, the NS6 USB LED blinked during the tested interval.
+At 01:13:02.201 the driver logged the final audio client pausing while the USB
+clock continued with silence; `StartIO` resumed that client at 01:13:02.388.
+At 01:13:02.440 the first new underrun was logged. By 01:13:05.416 the total
+had risen from 65 events / 340 frames to 83 / 434, an increase of 18 events /
+94 frames. USB transfer errors, packet errors, and short OUT packets remained
+zero.
+
+At the same 01:13:05 health snapshot, `WriteMix` reported a maximum 217.838 ms
+callback gap. That spans the stop/resume transition; it is not evidence of a
+217 ms scheduling stall while active. USB completion cadence averaged 4.0 ms,
+with 13.791 ms maximum, and frame-to-callback dispatch lag peaked at 10.102 ms.
+Thus the data points to a brief host-side queue deficit during restart, while
+the USB transport itself continued without transfer errors. The user's LED
+observation is temporally associated, but the logs do not measure LED state or
+prove that the underruns caused the blink.
+
+Code inspection found the resume prefill waits for at least 1,024 frames
+(23.2 ms) before consuming queued PCM, even though the adaptive clock's normal
+queue target is 4,096 frames (92.9 ms). The 0.2.150 test build aligns the
+minimum resume prefill with the configured queue target. This adds buffering
+only at initial start/resume; it does not change the steady-state clock target
+or the USB packet format. The full unit suite, arm64 driver build, USB
+work-interval regression, signature checks, and package creation passed. The
+package is ready for hardware testing; playback and LED behavior remain
+unverified.

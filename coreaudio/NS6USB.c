@@ -10,13 +10,13 @@
 #include "NS6AudioRecovery.h"
 #include "NS6AudioPrefill.h"
 #include "NS6FirmwareVersion.h"
-#include "NS6IOMetrics.h"
 #include "NS6FeedbackTelemetry.h"
 #include "NS6FeedbackReadGate.h"
 #include "NS6IdlePCM.h"
 #include "NS6CaptureDecoder.h"
 #include "NS6CaptureRing.h"
 #include "NS6BulkINIdlePolicy.h"
+#include "NS6PCMLevel.h"
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOCFPlugIn.h>
 #include <IOKit/IOKitLib.h>
@@ -96,6 +96,8 @@ static atomic_uint firmware_response_bits;
 static atomic_bool firmware_response_valid;
 static atomic_bool standby_prime_pending;
 static atomic_uint_fast64_t completed_transfers;
+static atomic_uint_fast64_t output_pcm_peak[4];
+static atomic_uint_fast64_t output_pcm_nonzero_frames;
 static NS6USBTiming completion_interval_timing;
 static NS6USBTiming completion_dispatch_lag_timing;
 static NS6USBTiming feedback_completion_interval_timing;
@@ -583,8 +585,9 @@ static void fill(struct slot *slot){
             ns6_clock_control_next_millisecond(&clock_control, millisecond_frames);
         unsigned frames=millisecond_frames[packet % 8u];
         slot->frames[packet].frReqCount=(UInt16)(frames*FRAME_BYTES); slot->frames[packet].frActCount=0; slot->frames[packet].frStatus=0;
-        if(atomic_load_explicit(&output_paused,memory_order_acquire)){
-            ns6_transport_discard();
+        if(atomic_load_explicit(&output_paused,memory_order_acquire)&&
+           ns6_transport_available()==0){
+            atomic_store_explicit(&awaiting_audio_prefill,true,memory_order_release);
             have_last_recovery_sample=false;
             /* Some NS6 units keep the USB indicator in its searching state
                until the first non-zero audio sample arrives. Prime one USB
@@ -617,7 +620,8 @@ static void fill(struct slot *slot){
         }
         UInt32 available=ns6_transport_available();
         double source_step=ns6_clock_control_source_frames_per_output_frame(&clock_control,available);
-        UInt32 received=ns6_transport_dequeue_resampled(output,frames,source_step);
+        NS6TransportStopReason stop_reason=NS6_TRANSPORT_STOP_NONE;
+        UInt32 received=ns6_transport_dequeue_resampled_diagnostic(output,frames,source_step,&stop_reason);
         if(received<frames){
             uint64_t missing=frames-received;
             uint64_t previous=atomic_fetch_add_explicit(&underrun_frames,missing,memory_order_relaxed);
@@ -626,7 +630,7 @@ static void fill(struct slot *slot){
             if(previous/4410!=(previous+missing)/4410)
                 os_log_error(OS_LOG_DEFAULT,"Numark NS6 audio queue underrun: %llu silent frames total",(unsigned long long)(previous+missing));
             if(should_log_once_per_second(&last_underrun_log_ms))
-                os_log_error(OS_LOG_DEFAULT,"Numark NS6 underrun detail: missing %llu frames in this USB packet; %llu events, %llu frames total, max burst %llu, queue now %u frames",(unsigned long long)missing,(unsigned long long)atomic_load_explicit(&underrun_events,memory_order_relaxed),(unsigned long long)(previous+missing),(unsigned long long)atomic_load_explicit(&underrun_max_burst,memory_order_relaxed),ns6_transport_available());
+                os_log_error(OS_LOG_DEFAULT,"Numark NS6 underrun detail: missing %llu frames in this USB packet; dequeue stop %{public}s; %llu events, %llu frames total, max burst %llu, queue now %u frames",(unsigned long long)missing,stop_reason==NS6_TRANSPORT_STOP_EMPTY?"queue-end":stop_reason==NS6_TRANSPORT_STOP_MISSING_TAG?"missing-tag":stop_reason==NS6_TRANSPORT_STOP_RING_LIMIT?"ring-limit":"invalid",(unsigned long long)atomic_load_explicit(&underrun_events,memory_order_relaxed),(unsigned long long)(previous+missing),(unsigned long long)atomic_load_explicit(&underrun_max_burst,memory_order_relaxed),ns6_transport_available());
             memset(output+received*FRAME_BYTES,0,(frames-received)*FRAME_BYTES);
             ns6_transport_advance_resampled((UInt32)missing,source_step);
         }
@@ -648,6 +652,12 @@ static void fill(struct slot *slot){
         }
         output+=frames*FRAME_BYTES;
     }
+    unsigned total_frames=0;
+    for(unsigned packet=0;packet<PACKETS;++packet)
+        total_frames+=slot->frames[packet].frReqCount/FRAME_BYTES;
+    NS6PCMLevel level=ns6_pcm24_measure(slot->data,total_frames);
+    for(unsigned channel=0;channel<4;++channel)update_max(&output_pcm_peak[channel],level.peak[channel]);
+    atomic_fetch_add_explicit(&output_pcm_nonzero_frames,level.nonzero_frames,memory_order_relaxed);
 }
 static void submit(struct slot *slot);
 static void request_recovery(const char *operation,IOReturn result){
@@ -713,14 +723,7 @@ static void complete(void *reference,IOReturn status,void *argument){
     uint64_t completed=atomic_fetch_add_explicit(&completed_transfers,1,memory_order_relaxed)+1;
     if(completed%2500==0){
         os_log(OS_LOG_DEFAULT,"Numark NS6 audio health: transfers %llu, underruns %llu events/%llu frames (max burst %llu), USB transfer errors %llu, packet errors %llu (last 0x%08x), short packets %llu/%llu bytes, OUT requested packet sizes 60/72/other %llu/%llu/%llu, queue %u frames",(unsigned long long)completed,(unsigned long long)atomic_load_explicit(&underrun_events,memory_order_relaxed),(unsigned long long)atomic_load_explicit(&underrun_frames,memory_order_relaxed),(unsigned long long)atomic_load_explicit(&underrun_max_burst,memory_order_relaxed),(unsigned long long)atomic_load_explicit(&isoc_transfer_errors,memory_order_relaxed),(unsigned long long)atomic_load_explicit(&isoc_packet_errors,memory_order_relaxed),(unsigned)atomic_load_explicit(&last_packet_status,memory_order_relaxed),(unsigned long long)atomic_load_explicit(&isoc_short_packets,memory_order_relaxed),(unsigned long long)atomic_load_explicit(&isoc_short_bytes,memory_order_relaxed),(unsigned long long)atomic_exchange_explicit(&isoc_60_byte_packets,0,memory_order_relaxed),(unsigned long long)atomic_exchange_explicit(&isoc_72_byte_packets,0,memory_order_relaxed),(unsigned long long)atomic_exchange_explicit(&isoc_other_size_packets,0,memory_order_relaxed),ns6_transport_available());
-        NS6IOMetricsSnapshot io_snapshots[NS6_IO_METRICS_MAX_CLIENTS];
-        size_t io_count=ns6_io_metrics_take_snapshot(&ns6_io_metrics,io_snapshots,NS6_IO_METRICS_MAX_CLIENTS);
-        for(size_t n=0;n<io_count;++n){
-            const NS6IOMetricsSnapshot *io=&io_snapshots[n];
-            double mean_frames=io->calls?(double)io->frames/(double)io->calls:0.0;
-            double mean_interval_us=io->interval_count?(double)io->interval_total_ns/(double)io->interval_count/1000.0:0.0;
-            os_log(OS_LOG_DEFAULT,"Numark NS6 CoreAudio WriteMix: client %u, %llu calls, mean %.1f frames/cycle, mean gap %.1f us, max gap %llu us, max enqueue %llu us, enqueue-over-period %llu",io->client_id,(unsigned long long)io->calls,mean_frames,mean_interval_us,(unsigned long long)(io->max_interval_ns/1000),(unsigned long long)(io->max_callback_ns/1000),(unsigned long long)io->deadline_misses);
-        }
+        os_log(OS_LOG_DEFAULT,"Numark NS6 USB output PCM level (24-bit peak): ch1 %llu, ch2 %llu, ch3 %llu, ch4 %llu; nonzero frames %llu",(unsigned long long)atomic_exchange_explicit(&output_pcm_peak[0],0,memory_order_relaxed),(unsigned long long)atomic_exchange_explicit(&output_pcm_peak[1],0,memory_order_relaxed),(unsigned long long)atomic_exchange_explicit(&output_pcm_peak[2],0,memory_order_relaxed),(unsigned long long)atomic_exchange_explicit(&output_pcm_peak[3],0,memory_order_relaxed),(unsigned long long)atomic_exchange_explicit(&output_pcm_nonzero_frames,0,memory_order_relaxed));
         NS6USBTimingSnapshot cadence={0},dispatch_lag={0},pre_fill={0},fill_work={0},fill_cpu={0},work={0},submit_api={0},submit_api_cpu={0};
         if(ns6_usb_timing_take_snapshot(&completion_interval_timing,&cadence))
             os_log(OS_LOG_DEFAULT,"Numark NS6 USB cadence: %llu intervals, mean %.1f us, min %llu us, max %llu us",(unsigned long long)cadence.intervals,(double)cadence.total_ns/(double)cadence.intervals/1000.0,(unsigned long long)(cadence.min_ns/1000),(unsigned long long)(cadence.max_ns/1000));
@@ -924,7 +927,7 @@ void ns6_usb_stop(void){
     pthread_mutex_lock(&lock); if(!thread_created){pthread_mutex_unlock(&lock);return;} atomic_store(&output_paused,true); atomic_store(&running,false); if(run_loop)CFRunLoopWakeUp(run_loop); pthread_mutex_unlock(&lock);
     pthread_join(thread,NULL); pthread_mutex_lock(&lock); thread_created=false; initialized=false; pthread_mutex_unlock(&lock);
 }
-void ns6_usb_set_paused(bool paused){if(!paused&&atomic_load_explicit(&recovery_requested,memory_order_acquire))return;if(!paused&&atomic_load_explicit(&output_paused,memory_order_acquire))atomic_store_explicit(&awaiting_audio_prefill,true,memory_order_release);if(paused)atomic_store_explicit(&awaiting_audio_prefill,false,memory_order_release);atomic_store_explicit(&output_paused,paused,memory_order_release);}
+void ns6_usb_set_paused(bool paused){if(!paused&&atomic_load_explicit(&recovery_requested,memory_order_acquire))return;bool was_paused=atomic_load_explicit(&output_paused,memory_order_acquire);if(!paused&&was_paused)atomic_store_explicit(&awaiting_audio_prefill,true,memory_order_release);atomic_store_explicit(&output_paused,paused,memory_order_release);if(was_paused!=paused)os_log(OS_LOG_DEFAULT,"Numark NS6 USB output pause transition: %{public}s -> %{public}s, USB running %{public}s, queued %u frames",was_paused?"paused":"active",paused?"paused":"active",atomic_load_explicit(&running,memory_order_acquire)?"yes":"no",ns6_transport_available());}
 void ns6_usb_log_io_transition(const char *event,uint32_t client,unsigned clients_before,unsigned clients_after){
     os_log(OS_LOG_DEFAULT,"Numark NS6 I/O boundary %{public}s: client %u, clients %u->%u, USB running %{public}s, output paused %{public}s, queue %u frames, OUT transfers %llu, underruns %llu events/%llu frames, USB errors %llu, packet errors %llu, short packets %llu/%llu bytes, OUT sizes since health 60/72/other %llu/%llu/%llu, feedback samples %llu, feedback errors %llu, endpoint 0x86 drain %{public}s",
         event?event:"unknown",client,clients_before,clients_after,

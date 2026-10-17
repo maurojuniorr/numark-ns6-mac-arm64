@@ -1,6 +1,7 @@
 #include "NS6Transport.h"
 #include "NS6SharedMemory.h"
 #include "NS6BufferFrameSize.h"
+#include "NS6ConnectionPolicy.h"
 #include "NS6ZeroTimestamp.h"
 #include "NS6ActiveFlow.h"
 #include "NS6IOClientAccounting.h"
@@ -33,7 +34,7 @@ enum { DEVICE_ID=2, STREAM_ID=3, INPUT_STREAM_ID=4 };
 #define NS6_ACTIVE_CLIENT_PROPERTY ((AudioObjectPropertySelector)0x6e733663u) /* 'ns6c' */
 #define NS6_FIRMWARE_VERSION_PROPERTY ((AudioObjectPropertySelector)0x6e733676u) /* 'ns6v' */
 #define NS6_DRIVER_BUFFER_STORAGE_KEY CFSTR("driver-startup-buffer-frames")
-#define NS6_TRACKED_CLIENTS 32
+#define NS6_TRACKED_CLIENTS 128 /* CoreAudio can register more than 32 clients. */
 typedef struct { UInt32 client_id; pid_t pid; char bundle_id[256]; unsigned starts; UInt64 order; bool used; } NS6TrackedClient;
 static NS6TrackedClient tracked_clients[NS6_TRACKED_CLIENTS];
 static UInt64 client_order;
@@ -50,6 +51,7 @@ static atomic_uint buffer_restart_state;
 static AudioServerPlugInHostRef host;
 static UInt32 references=1,seed=1;
 static atomic_uint io_clients;
+static unsigned untracked_io_starts;
 static UInt64 anchor_host_time;
 static mach_timebase_info_data_t timebase;
 static void initialize_io_metrics(void){ns6_io_metrics_init(&ns6_io_metrics);}
@@ -83,12 +85,22 @@ static bool usb_property_u16(io_registry_entry_t entry,CFStringRef key,UInt16 *o
 static bool ns6_connected(void){io_iterator_t iterator=IO_OBJECT_NULL;io_service_t service;if(IOServiceGetMatchingServices(kIOMainPortDefault,IOServiceMatching("IOUSBHostDevice"),&iterator)!=KERN_SUCCESS)return false;bool found=false;while((service=IOIteratorNext(iterator))){UInt16 vendor=0,product=0;if(usb_property_u16(service,CFSTR(kUSBVendorID),&vendor)&&usb_property_u16(service,CFSTR(kUSBProductID),&product)&&vendor==0x15e4&&product==0x0079)found=true;IOObjectRelease(service);if(found)break;}IOObjectRelease(iterator);return found;}
 static void publish_connection_state(void){
     bool connected=ns6_connected();
+    unsigned active_clients=atomic_load_explicit(&io_clients,memory_order_acquire);
+    if(ns6_connection_should_defer_disconnect(connected,active_clients)){
+        os_log(OS_LOG_DEFAULT,"Numark NS6 USB disconnected while %u CoreAudio clients are active; preserving the HAL device so clients can resume after USB recovery",active_clients);
+        return;
+    }
     if(!connected&&atomic_load_explicit(&device_present,memory_order_acquire)){
         /* USB enumeration can briefly lose the device while CoreAudio and the
            NS6 interfaces settle after boot. Don't withdraw the HAL device on
            one transient negative registry query. */
         const struct timespec settle={0,250000000};nanosleep(&settle,NULL);
         connected=ns6_connected();
+        active_clients=atomic_load_explicit(&io_clients,memory_order_acquire);
+        if(ns6_connection_should_defer_disconnect(connected,active_clients)){
+            os_log(OS_LOG_DEFAULT,"Numark NS6 USB disconnected while %u CoreAudio clients are active; preserving the HAL device so clients can resume after USB recovery",active_clients);
+            return;
+        }
     }
     bool previous=atomic_exchange_explicit(&device_present,connected,memory_order_acq_rel);
     if(previous==connected)return;
@@ -110,11 +122,35 @@ static void publish_device_mapping_locked(void){
         atomic_store_explicit(&service_ready,true,memory_order_release);
     }else atomic_store_explicit(&service_ready,false,memory_order_release);
 }
+static void log_io_metrics(void){
+    NS6IOMetricsSnapshot snapshots[NS6_IO_METRICS_MAX_CLIENTS];
+    size_t count=ns6_io_metrics_take_snapshot(&ns6_io_metrics,snapshots,NS6_IO_METRICS_MAX_CLIENTS);
+    for(size_t n=0;n<count;++n){
+        const NS6IOMetricsSnapshot *metric=&snapshots[n];
+        if(!metric->calls)continue;
+        double mean_frames=(double)metric->frames/(double)metric->calls;
+        double mean_interval_us=metric->interval_count?
+            (double)metric->interval_total_ns/(double)metric->interval_count/1000.0:0.0;
+        os_log(OS_LOG_DEFAULT,"Numark NS6 CoreAudio output: client %u, %llu calls, mean %.1f frames/cycle, mean gap %.1f us, max gap %llu us, max callback %llu us, callback execution overruns %llu, duplicate cycles %llu, skipped cycles %llu, last cycle %llu, output sample time %{public}s:%llu, last frames %u",
+               metric->client_id,(unsigned long long)metric->calls,mean_frames,mean_interval_us,
+               (unsigned long long)(metric->max_interval_ns/1000),
+               (unsigned long long)(metric->max_callback_ns/1000),
+               (unsigned long long)metric->deadline_misses,
+               (unsigned long long)metric->duplicate_cycles,
+               (unsigned long long)metric->skipped_cycles,
+               (unsigned long long)metric->last_cycle,
+               metric->output_sample_time_valid?"valid":"invalid",
+               (unsigned long long)metric->last_output_sample_time,
+               metric->last_output_frames);
+    }
+}
 static void *device_service_monitor(void *unused){
     (void)unused;
     const struct timespec interval={1,0};
     for(;;){
         nanosleep(&interval,NULL);
+        pthread_once(&io_metrics_once,initialize_io_metrics);
+        log_io_metrics();
         pthread_mutex_lock(&stream_lock);
         NS6DeviceStateSnapshot snapshot={0};
         NS6DeviceClientStateResult state_result=device_client.connected?
@@ -205,11 +241,41 @@ static OSStatus initialize(AudioServerPlugInDriverRef value,AudioServerPlugInHos
 static OSStatus create_device(AudioServerPlugInDriverRef d,CFDictionaryRef x,const AudioServerPlugInClientInfo*y,AudioObjectID*z){(void)d;(void)x;(void)y;(void)z;return kAudioHardwareUnsupportedOperationError;} static OSStatus destroy_device(AudioServerPlugInDriverRef d,AudioObjectID x){(void)d;(void)x;return kAudioHardwareUnsupportedOperationError;}
 static NS6TrackedClient *find_client_locked(UInt32 client_id){for(size_t n=0;n<NS6_TRACKED_CLIENTS;++n)if(tracked_clients[n].used&&tracked_clients[n].client_id==client_id)return &tracked_clients[n];return NULL;}
 static void refresh_client_identity_locked(void){NS6TrackedClient *latest=NULL;for(size_t n=0;n<NS6_TRACKED_CLIENTS;++n)if(tracked_clients[n].used&&tracked_clients[n].starts&&(!latest||tracked_clients[n].order>latest->order))latest=&tracked_clients[n];if(latest)os_log(OS_LOG_DEFAULT,"Numark NS6 active CoreAudio client: %{public}s pid=%d",latest->bundle_id,latest->pid);}
-static OSStatus add_client(AudioServerPlugInDriverRef d,AudioObjectID object,const AudioServerPlugInClientInfo *info){(void)d;if(object!=DEVICE_ID||!info)return 0;char bundle_id[256]="unknown";if(info->mBundleID)CFStringGetCString(info->mBundleID,bundle_id,sizeof(bundle_id),kCFStringEncodingUTF8);pthread_mutex_lock(&stream_lock);NS6TrackedClient *slot=find_client_locked(info->mClientID);if(!slot)for(size_t n=0;n<NS6_TRACKED_CLIENTS;++n)if(!tracked_clients[n].used){slot=&tracked_clients[n];break;}if(slot){memset(slot,0,sizeof(*slot));slot->used=true;slot->client_id=info->mClientID;slot->pid=info->mProcessID;strlcpy(slot->bundle_id,bundle_id,sizeof(slot->bundle_id));}pthread_mutex_unlock(&stream_lock);os_log(OS_LOG_DEFAULT,"Numark NS6 CoreAudio client added: id=%u pid=%d bundle=%{public}s tracked=%{public}s",info->mClientID,info->mProcessID,bundle_id,slot?"yes":"no");return 0;}
-static OSStatus remove_client(AudioServerPlugInDriverRef d,AudioObjectID object,const AudioServerPlugInClientInfo *info){(void)d;if(object!=DEVICE_ID||!info)return 0;pid_t pid=0;char bundle_id[256]="unknown";pthread_mutex_lock(&stream_lock);NS6TrackedClient *slot=find_client_locked(info->mClientID);if(slot){pid=slot->pid;strlcpy(bundle_id,slot->bundle_id,sizeof(bundle_id));memset(slot,0,sizeof(*slot));}refresh_client_identity_locked();pthread_mutex_unlock(&stream_lock);os_log(OS_LOG_DEFAULT,"Numark NS6 CoreAudio client removed: id=%u pid=%d bundle=%{public}s",info->mClientID,pid,bundle_id);return 0;}
+static OSStatus add_client(AudioServerPlugInDriverRef d,AudioObjectID object,const AudioServerPlugInClientInfo *info){(void)d;if(object!=DEVICE_ID||!info)return 0;char bundle_id[256]="unknown";if(info->mBundleID)CFStringGetCString(info->mBundleID,bundle_id,sizeof(bundle_id),kCFStringEncodingUTF8);pthread_mutex_lock(&stream_lock);NS6TrackedClient *slot=find_client_locked(info->mClientID);bool existing=slot!=NULL;if(!slot)for(size_t n=0;n<NS6_TRACKED_CLIENTS;++n)if(!tracked_clients[n].used){slot=&tracked_clients[n];break;}if(slot){if(!existing)memset(slot,0,sizeof(*slot));slot->used=true;slot->client_id=info->mClientID;slot->pid=info->mProcessID;strlcpy(slot->bundle_id,bundle_id,sizeof(slot->bundle_id));}pthread_mutex_unlock(&stream_lock);os_log(OS_LOG_DEFAULT,"Numark NS6 CoreAudio client added: id=%u pid=%d bundle=%{public}s tracked=%{public}s",info->mClientID,info->mProcessID,bundle_id,slot?"yes":"no");return 0;}
+static OSStatus remove_client(AudioServerPlugInDriverRef d,AudioObjectID object,const AudioServerPlugInClientInfo *info){
+    (void)d;
+    if(object!=DEVICE_ID||!info)return 0;
+    pid_t pid=0;
+    char bundle_id[256]="unknown";
+    unsigned released_starts=0;
+    bool became_idle=false;
+    pthread_mutex_lock(&stream_lock);
+    unsigned clients=atomic_load_explicit(&io_clients,memory_order_acquire);
+    NS6TrackedClient *slot=find_client_locked(info->mClientID);
+    if(slot){
+        pid=slot->pid;
+        strlcpy(bundle_id,slot->bundle_id,sizeof(bundle_id));
+        released_starts=ns6_io_client_account_remove(&slot->starts,&clients);
+        memset(slot,0,sizeof(*slot));
+        if(released_starts){
+            atomic_store_explicit(&io_clients,clients,memory_order_release);
+            if(!clients){
+                became_idle=true;
+                ns6_active_flow_clear(&active_flow);
+                (void)ns6_device_client_set_audio_active(&device_client,false);
+                os_log(OS_LOG_DEFAULT,"Numark NS6 audio inactive after client removal; persistent service keeps the USB clock alive with silence (client %u)",info->mClientID);
+            }
+        }
+    }
+    refresh_client_identity_locked();
+    pthread_mutex_unlock(&stream_lock);
+    os_log(OS_LOG_DEFAULT,"Numark NS6 CoreAudio client removed: id=%u pid=%d bundle=%{public}s, released active starts %u, aggregate active clients %u",info->mClientID,pid,bundle_id,released_starts,atomic_load_explicit(&io_clients,memory_order_acquire));
+    if(became_idle)publish_connection_state();
+    return 0;
+}
 static bool supported_buffer_size(UInt32 frames){for(size_t i=0;i<sizeof(supported_buffer_frames)/sizeof(supported_buffer_frames[0]);++i)if(supported_buffer_frames[i]==frames)return true;return false;}
-static OSStatus perform_change(AudioServerPlugInDriverRef d,AudioObjectID object,UInt64 action,void *info){(void)d;(void)action;(void)info;return object==DEVICE_ID?0:kAudioHardwareBadObjectError;}
-static OSStatus abort_change(AudioServerPlugInDriverRef d,AudioObjectID object,UInt64 action,void*info){(void)d;(void)action;(void)info;return object==DEVICE_ID?0:kAudioHardwareBadObjectError;}
+static OSStatus perform_change(AudioServerPlugInDriverRef d,AudioObjectID object,UInt64 action,void *info){(void)d;os_log(OS_LOG_DEFAULT,"Numark NS6 PerformDeviceConfigurationChange: object %u, action 0x%llx, info %{public}s, active clients %u, buffer %u frames",object,(unsigned long long)action,info?"present":"null",atomic_load_explicit(&io_clients,memory_order_acquire),atomic_load_explicit(&buffer_frames,memory_order_acquire));return object==DEVICE_ID?0:kAudioHardwareBadObjectError;}
+static OSStatus abort_change(AudioServerPlugInDriverRef d,AudioObjectID object,UInt64 action,void*info){(void)d;os_log_error(OS_LOG_DEFAULT,"Numark NS6 AbortDeviceConfigurationChange: object %u, action 0x%llx, info %{public}s, active clients %u",object,(unsigned long long)action,info?"present":"null",atomic_load_explicit(&io_clients,memory_order_acquire));return object==DEVICE_ID?0:kAudioHardwareBadObjectError;}
 
 static Boolean has_property(AudioServerPlugInDriverRef d,AudioObjectID object,pid_t pid,const AudioObjectPropertyAddress *address){
     (void)d;(void)pid;if(!valid_object(object)||!address)return false;
@@ -329,20 +395,60 @@ static OSStatus start_io(AudioServerPlugInDriverRef d,AudioObjectID object,UInt3
     if(object!=DEVICE_ID)return kAudioHardwareBadObjectError;
     pthread_once(&io_metrics_once,initialize_io_metrics);
     if(!atomic_load(&device_present)){os_log_error(OS_LOG_DEFAULT,"Numark NS6 start_io refused: USB device absent");return kAudioHardwareNotRunningError;}
+    uint64_t start_io_begin_ns=io_monotonic_ns();
     pthread_mutex_lock(&stream_lock);
+    uint64_t lock_acquired_ns=io_monotonic_ns();
+    uint64_t lock_wait_us=lock_acquired_ns>=start_io_begin_ns?(lock_acquired_ns-start_io_begin_ns)/1000:0;
     unsigned clients=atomic_load_explicit(&io_clients,memory_order_acquire);
     unsigned clients_before=clients;
-    bool activated=atomic_load_explicit(&service_ready,memory_order_acquire)&&device_client.connected&&
-                   ns6_device_client_set_audio_active(&device_client,true);
-    if(!activated){pthread_mutex_unlock(&stream_lock);os_log_error(OS_LOG_DEFAULT,"Numark NS6 StartIO failed: persistent USB service unavailable");return kAudioHardwareUnspecifiedError;}
+    bool service_available=atomic_load_explicit(&service_ready,memory_order_acquire)&&device_client.connected;
+    bool activate_service=ns6_io_client_needs_service_activation(clients_before);
+    bool activated=service_available;
+    uint64_t activation_start_ns=0;
+    if(activated&&activate_service){
+        activation_start_ns=io_monotonic_ns();
+        activated=ns6_device_client_set_audio_active(&device_client,true);
+        uint64_t activation_end_ns=io_monotonic_ns();
+        os_log(OS_LOG_DEFAULT,"Numark NS6 StartIO service activation: client %u, IPC %llu us, success %{public}s",
+               client,(unsigned long long)(activation_end_ns>=activation_start_ns?(activation_end_ns-activation_start_ns)/1000:0),
+               activated?"yes":"no");
+    }
+    bool reprimed_service=false;
+    if(activated&&!activate_service&&device_client.shared_memory&&timebase.numer){
+        uint64_t now=mach_absolute_time();
+        uint64_t stale_after_ticks=(100000000ull*timebase.denom)/timebase.numer;
+        NS6ActiveFlowSnapshot flow=ns6_active_flow_snapshot(&active_flow,now,stale_after_ticks);
+        unsigned queued=ns6_transport_available_shared(&device_client.shared_memory->output);
+        if(ns6_active_flow_should_rearm(flow,queued,1024)){
+            uint64_t last=atomic_load_explicit(&active_flow.last_callback_tick,memory_order_acquire);
+            uint64_t idle_ticks=last&&now>=last?now-last:UINT64_MAX;
+            uint64_t idle_us=idle_ticks==UINT64_MAX?UINT64_MAX:
+                (idle_ticks*timebase.numer)/(timebase.denom*1000ull);
+            bool paused=ns6_device_client_set_audio_active(&device_client,false);
+            activated=paused&&ns6_device_client_set_audio_active(&device_client,true);
+            reprimed_service=activated;
+            os_log(OS_LOG_DEFAULT,"Numark NS6 StartIO re-primed stale output: client %u, queued %u frames, last output callback %llu us ago, success %{public}s",
+                   client,queued,(unsigned long long)idle_us,activated?"yes":"no");
+        }
+    }
+    if(!activated){uint64_t start_io_end_ns=io_monotonic_ns();pthread_mutex_unlock(&stream_lock);os_log_error(OS_LOG_DEFAULT,"Numark NS6 StartIO failed: persistent USB service unavailable, lock wait %llu us, StartIO total %llu us",
+        (unsigned long long)lock_wait_us,(unsigned long long)(start_io_end_ns>=start_io_begin_ns?(start_io_end_ns-start_io_begin_ns)/1000:0));return kAudioHardwareUnspecifiedError;}
     NS6TrackedClient *active_client=find_client_locked(client);
     if(active_client){ns6_io_client_account_start(&active_client->starts,&clients);active_client->order=++client_order;refresh_client_identity_locked();}
-    else{++clients;os_log_error(OS_LOG_DEFAULT,"Numark NS6 StartIO client %u was not tracked by AddDeviceClient",client);}
+    else{ns6_io_client_account_untracked_start(&untracked_io_starts,&clients);os_log_error(OS_LOG_DEFAULT,"Numark NS6 StartIO client %u was not tracked by AddDeviceClient; retaining an aggregate stop token",client);}
+    os_log(OS_LOG_DEFAULT,"Numark NS6 StartIO accounting: client %u pid %d bundle %{public}s, client starts %u, untracked starts %u, aggregate %u -> %u",
+           client,active_client?active_client->pid:0,active_client?active_client->bundle_id:"unknown",
+           active_client?active_client->starts:0,untracked_io_starts,clients_before,clients);
     if(clients_before==0){
-        anchor_host_time=mach_absolute_time();++seed;atomic_store(&enqueue_failures,0);atomic_store(&last_enqueue_log_ms,0);
+        UInt64 previous_anchor=anchor_host_time;
+        anchor_host_time=ns6_zero_timestamp_keep_anchor(anchor_host_time,mach_absolute_time());
+        if(!previous_anchor)++seed;
+        atomic_store(&enqueue_failures,0);atomic_store(&last_enqueue_log_ms,0);
     }
     atomic_store_explicit(&io_clients,clients,memory_order_release);
-    os_log(OS_LOG_DEFAULT,"Numark NS6 audio stream resumed (sample rate %.0f, client %u; %u prior clients)",SAMPLE_RATE,client,clients_before);
+    uint64_t start_io_end_ns=io_monotonic_ns();
+    os_log(OS_LOG_DEFAULT,"Numark NS6 audio stream resumed (sample rate %.0f, client %u; %u prior clients; service activation %s; StartIO lock wait %llu us; StartIO total %llu us)",SAMPLE_RATE,client,clients_before,activate_service?"requested":reprimed_service?"re-primed":"already active",
+        (unsigned long long)lock_wait_us,(unsigned long long)(start_io_end_ns>=start_io_begin_ns?(start_io_end_ns-start_io_begin_ns)/1000:0));
     pthread_mutex_unlock(&stream_lock);
     return 0;
 }
@@ -351,22 +457,30 @@ static OSStatus stop_io(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32
     if(object!=DEVICE_ID)return kAudioHardwareBadObjectError;
     pthread_mutex_lock(&stream_lock);
     unsigned clients=atomic_load_explicit(&io_clients,memory_order_acquire);
+    unsigned clients_before=clients;
+    bool became_idle=false;
     NS6TrackedClient *active_client=find_client_locked(client);
-    bool matched_start=active_client&&ns6_io_client_account_stop(&active_client->starts,&clients);
+    bool matched_start=ns6_io_client_account_stop(active_client?&active_client->starts:NULL,&untracked_io_starts,&clients);
     if(matched_start){
         atomic_store_explicit(&io_clients,clients,memory_order_release);
         if(!clients){
+            became_idle=true;
             ns6_active_flow_clear(&active_flow);
             (void)ns6_device_client_set_audio_active(&device_client,false);
             os_log(OS_LOG_DEFAULT,"Numark NS6 audio inactive; persistent service keeps the USB clock alive with silence (client %u)",client);
         }
-    }else os_log_error(OS_LOG_DEFAULT,"Numark NS6 ignoring unmatched StopIO for client %u (tracked starts %u, active starts %u)",client,active_client?active_client->starts:0,clients);
+    }else os_log_error(OS_LOG_DEFAULT,"Numark NS6 ignoring unmatched StopIO for client %u (tracked starts %u, untracked starts %u, active starts %u)",client,active_client?active_client->starts:0,untracked_io_starts,clients);
+    os_log(OS_LOG_DEFAULT,"Numark NS6 StopIO accounting: client %u pid %d bundle %{public}s, matched %{public}s, client starts %u, untracked starts %u, aggregate %u -> %u",
+           client,active_client?active_client->pid:0,active_client?active_client->bundle_id:"unknown",
+           matched_start?"yes":"no",active_client?active_client->starts:0,
+           untracked_io_starts,clients_before,clients);
     refresh_client_identity_locked();
     pthread_mutex_unlock(&stream_lock);
+    if(became_idle)publish_connection_state();
     return 0;
 }
 static OSStatus zero_timestamp(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32 client,Float64 *sample,UInt64 *host_time,UInt64 *out_seed){(void)d;(void)client;if(object!=DEVICE_ID||!sample||!host_time||!out_seed)return kAudioHardwareIllegalOperationError;NS6ZeroTimestamp value=ns6_zero_timestamp_calculate(anchor_host_time,mach_absolute_time(),timebase.numer,timebase.denom,SAMPLE_RATE);*sample=(Float64)value.sample_time;*host_time=value.host_time;*out_seed=seed;return 0;}
-static OSStatus will_do(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32 client,UInt32 operation,Boolean *will,Boolean *in_place){(void)d;(void)object;(void)client;if(!will||!in_place)return kAudioHardwareIllegalOperationError;*will=operation==kAudioServerPlugInIOOperationWriteMix||operation==kAudioServerPlugInIOOperationReadInput;*in_place=true;return 0;}
+static OSStatus will_do(AudioServerPlugInDriverRef d,AudioObjectID object,UInt32 client,UInt32 operation,Boolean *will,Boolean *in_place){(void)d;(void)object;if(!will||!in_place)return kAudioHardwareIllegalOperationError;*will=operation==kAudioServerPlugInIOOperationWriteMix||operation==kAudioServerPlugInIOOperationReadInput;*in_place=true;os_log(OS_LOG_DEFAULT,"Numark NS6 WillDoIOOperation: client %u, operation 0x%08x, will do %{public}s, in place yes",client,operation,*will?"yes":"no");return 0;}
 static OSStatus begin_io(AudioServerPlugInDriverRef d,AudioObjectID o,UInt32 c,UInt32 op,UInt32 frames,const AudioServerPlugInIOCycleInfo*i){(void)d;(void)i;if(o==DEVICE_ID&&op==kAudioServerPlugInIOOperationWriteMix&&frames)ns6_active_flow_record(&active_flow,frames,c,mach_absolute_time());return 0;}
 static OSStatus do_io(AudioServerPlugInDriverRef d,AudioObjectID object,AudioObjectID stream,UInt32 client,UInt32 operation,UInt32 frames,const AudioServerPlugInIOCycleInfo*i,void *main_buffer,void *secondary){
     (void)d;(void)secondary;
@@ -406,20 +520,31 @@ static OSStatus do_io(AudioServerPlugInDriverRef d,AudioObjectID object,AudioObj
         ns6_active_flow_record(&active_flow,frames,client,mach_absolute_time());
         uint64_t callback_start_ns=io_monotonic_ns();
         NS6TransportShared *output_ring=&memory->output;
+        uint64_t output_sample_time=0;
+        bool output_time_valid=false;
+        if(i&&(i->mOutputTime.mFlags&kAudioTimeStampSampleTimeValid)&&
+           isfinite(i->mOutputTime.mSampleTime)&&i->mOutputTime.mSampleTime>=0.0&&
+           i->mOutputTime.mSampleTime<(double)UINT64_MAX){
+            output_sample_time=(uint64_t)i->mOutputTime.mSampleTime;
+            output_time_valid=true;
+        }
         bool accepted=ns6_transport_enqueue_shared(output_ring,main_buffer,frames,&stream_format);
         uint64_t callback_end_ns=io_monotonic_ns();
         uint64_t callback_ns=callback_end_ns>=callback_start_ns?callback_end_ns-callback_start_ns:0;
         uint64_t deadline_ns=frames?(uint64_t)frames*1000000000ull/(uint64_t)SAMPLE_RATE:0;
-        ns6_io_metrics_record_timed(&ns6_io_metrics,client,frames,i?i->mIOCycleCounter:0,callback_start_ns,callback_ns,deadline_ns);
+        ns6_io_metrics_record_output_timed(&ns6_io_metrics,client,frames,
+            i?i->mIOCycleCounter:0,output_sample_time,output_time_valid,
+            callback_start_ns,callback_ns,deadline_ns);
         if(!accepted){
             unsigned failures=atomic_fetch_add(&enqueue_failures,1)+1;
             uint64_t now=mach_absolute_time();double now_ms=(double)now*timebase.numer/timebase.denom/1e6;
             uint_fast64_t previous=atomic_load_explicit(&last_enqueue_log_ms,memory_order_relaxed);
             if(failures==1||(now_ms-previous>=1000&&atomic_compare_exchange_strong_explicit(&last_enqueue_log_ms,&previous,(uint_fast64_t)now_ms,memory_order_relaxed,memory_order_relaxed)))
-                os_log_error(OS_LOG_DEFAULT,"Numark NS6 rejected CoreAudio buffer: %u cumulative failures, %u input frames, %u queued USB frames",failures,frames,output_ring?ns6_transport_available_shared(output_ring):0);
+                os_log_error(OS_LOG_DEFAULT,"Numark NS6 could not enqueue CoreAudio output buffer: %u cumulative failures, client %u, sample time %{public}s:%llu, %u input frames, %u queued USB frames",failures,client,output_time_valid?"valid":"implicit",(unsigned long long)output_sample_time,frames,ns6_transport_available_shared(output_ring));
             ns6_device_session_io_end(&memory->session);
             ns6_hal_mapping_release(&callback_mapping);
-            return kAudioHardwareUnspecifiedError;
+            /* A dropped block must not tear down every CoreAudio client. */
+            return 0;
         }
         ns6_device_session_io_end(&memory->session);
         ns6_hal_mapping_release(&callback_mapping);

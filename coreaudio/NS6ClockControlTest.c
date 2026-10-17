@@ -1,4 +1,5 @@
 #include "NS6ClockControl.h"
+#include "NS6Transport.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -241,7 +242,7 @@ static void test_queue_stays_below_overflow_during_60s_rate_mismatch(void) {
         queue += (double)produced - (double)consumed;
         if (queue < 0.0) queue = 0.0;
         if (queue > peak) peak = queue;
-        assert(queue < 16384.0 && "CoreAudio ring overflowed in rate-mismatch simulation");
+        assert(queue < NS6_TRANSPORT_RING_FRAMES && "CoreAudio ring overflowed in rate-mismatch simulation");
     }
     assert(peak < 8192.0 && "adaptive trim failed to recover before ring overflow");
     printf("queue target %u: 60 s rate-mismatch peak %.0f frames\n",
@@ -276,7 +277,7 @@ static void test_queue_recovers_when_hardware_output_is_44k(void) {
         queue += (double)produced - (double)consumed;
         if (queue < 0.0) queue = 0.0;
         if (queue > peak) peak = queue;
-        assert(queue < 16384.0 && "44 kHz device cadence overflowed the transport ring");
+        assert(queue < NS6_TRANSPORT_RING_FRAMES && "44 kHz device cadence overflowed the transport ring");
     }
     assert(peak < 8192.0 && "queue trim cannot recover from the measured 44 kHz cadence");
     printf("queue target %u: 180 s 44 kHz-cadence peak %.0f frames\n",

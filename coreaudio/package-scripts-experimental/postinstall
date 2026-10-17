@@ -1,18 +1,13 @@
 #!/bin/zsh
 set -eu
-AGENT="/Library/LaunchAgents/io.github.maurojuniorr.numark-ns6-device-service.plist"
+DAEMON="/Library/LaunchDaemons/io.github.maurojuniorr.numark-ns6-device-service.plist"
 PROBE="/Applications/Numark NS6 Status.app/Contents/Resources/ns6-service-probe"
 ROLLBACK="/Applications/Numark NS6 Status.app/Contents/Resources/rollback-persistent-service"
-CONSOLE_UID=$(/usr/bin/stat -f '%u' /dev/console)
-
-if [[ "$CONSOLE_UID" == "0" ]]; then
-    print -u2 'No logged-in GUI user; persistent NS6 service was not started.'
-    exit 1
-fi
-
 LABEL='io.github.maurojuniorr.numark-ns6-device-service'
-if ! /bin/launchctl bootstrap "gui/$CONSOLE_UID" "$AGENT" >/dev/null 2>&1 && \
-   ! /bin/launchctl kickstart -k "gui/$CONSOLE_UID/$LABEL" >/dev/null 2>&1; then
+MIDI_AGENT="/Library/LaunchAgents/io.github.maurojuniorr.numark-ns6-midi-bridge.plist"
+CONSOLE_UID=$(/usr/bin/stat -f '%u' /dev/console)
+if ! /bin/launchctl bootstrap system "$DAEMON" >/dev/null 2>&1 && \
+   ! /bin/launchctl kickstart -k "system/$LABEL" >/dev/null 2>&1; then
     print -u2 'Could not start the NS6 device service; restoring the previous installation.'
     /bin/zsh "$ROLLBACK"
     exit 1
@@ -28,6 +23,12 @@ for _ in {1..20}; do
 done
 if [[ "$READY" != "1" ]]; then
     print -u2 'NS6 Mach service did not answer its protocol probe; restoring the previous installation.'
+    /bin/zsh "$ROLLBACK"
+    exit 1
+fi
+
+if [[ "$CONSOLE_UID" != "0" ]] && ! /bin/launchctl bootstrap "gui/$CONSOLE_UID" "$MIDI_AGENT" >/dev/null 2>&1; then
+    print -u2 'Could not start the user-session MIDI bridge; restoring the previous installation.'
     /bin/zsh "$ROLLBACK"
     exit 1
 fi

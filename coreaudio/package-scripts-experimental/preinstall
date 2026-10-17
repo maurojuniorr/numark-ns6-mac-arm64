@@ -3,16 +3,11 @@ set -eu
 
 APP_SUPPORT="/Library/Application Support/Numark NS6/rollback-previous"
 OLD_AGENT="/Library/LaunchAgents/io.github.maurojuniorr.numark-ns6-midi-bridge.plist"
-NEW_AGENT="/Library/LaunchAgents/io.github.maurojuniorr.numark-ns6-device-service.plist"
+OLD_DEVICE_AGENT="/Library/LaunchAgents/io.github.maurojuniorr.numark-ns6-device-service.plist"
+SYSTEM_DAEMON="/Library/LaunchDaemons/io.github.maurojuniorr.numark-ns6-device-service.plist"
 OLD_DRIVER="/Library/Audio/Plug-Ins/HAL/NumarkNS6M1.driver"
 STATUS_APP="/Applications/Numark NS6 Status.app"
 CONSOLE_UID=$(/usr/bin/stat -f '%u' /dev/console)
-
-# Refuse a login-window install before changing any existing files or services.
-if [[ "$CONSOLE_UID" == "0" ]]; then
-    print -u2 'No logged-in GUI user; existing NS6 installation was left untouched.'
-    exit 1
-fi
 
 /bin/rm -rf "$APP_SUPPORT"
 /bin/mkdir -p "$APP_SUPPORT"
@@ -28,12 +23,20 @@ if [[ -f "$OLD_AGENT" ]]; then
     /bin/cp "$OLD_AGENT" "$APP_SUPPORT/numark-ns6-midi-bridge.plist"
     /usr/bin/touch "$APP_SUPPORT/had-midi-agent"
 fi
-if [[ -f "$NEW_AGENT" ]]; then
-    /bin/cp "$NEW_AGENT" "$APP_SUPPORT/numark-ns6-device-service.plist"
+if [[ -f "$OLD_DEVICE_AGENT" ]]; then
+    /bin/cp "$OLD_DEVICE_AGENT" "$APP_SUPPORT/numark-ns6-device-service.plist"
     /usr/bin/touch "$APP_SUPPORT/had-device-service-agent"
 fi
-/bin/launchctl bootout "gui/$CONSOLE_UID" "$NEW_AGENT" >/dev/null 2>&1 || true
-/bin/launchctl bootout "gui/$CONSOLE_UID" "$OLD_AGENT" >/dev/null 2>&1 || true
+if [[ -f "$SYSTEM_DAEMON" ]]; then
+    /bin/cp "$SYSTEM_DAEMON" "$APP_SUPPORT/numark-ns6-device-service-daemon.plist"
+    /usr/bin/touch "$APP_SUPPORT/had-device-service-daemon"
+fi
+/bin/launchctl bootout system "$SYSTEM_DAEMON" >/dev/null 2>&1 || true
+if [[ "$CONSOLE_UID" != "0" ]]; then
+    /bin/launchctl bootout "gui/$CONSOLE_UID" "$OLD_DEVICE_AGENT" >/dev/null 2>&1 || true
+    /bin/launchctl bootout "gui/$CONSOLE_UID" "$OLD_AGENT" >/dev/null 2>&1 || true
+fi
 /bin/rm -f "$OLD_AGENT"
+/bin/rm -f "$OLD_DEVICE_AGENT" "$SYSTEM_DAEMON"
 /usr/bin/killall NumarkNS6MIDIBridge NumarkNS6DeviceService >/dev/null 2>&1 || true
 exit 0

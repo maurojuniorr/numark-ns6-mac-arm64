@@ -19,6 +19,9 @@ void ns6_io_metrics_init(NS6IOMetrics *metrics) {
         atomic_init(&metrics->clients[i].calls, 0);
         atomic_init(&metrics->clients[i].frames, 0);
         atomic_init(&metrics->clients[i].last_cycle, 0);
+        atomic_init(&metrics->clients[i].last_output_sample_time, 0);
+        atomic_init(&metrics->clients[i].last_output_frames, 0);
+        atomic_init(&metrics->clients[i].output_sample_time_valid, false);
         atomic_init(&metrics->clients[i].duplicate_cycles, 0);
         atomic_init(&metrics->clients[i].skipped_cycles, 0);
         atomic_init(&metrics->clients[i].last_callback_start_ns, 0);
@@ -101,6 +104,23 @@ void ns6_io_metrics_record_timed(NS6IOMetrics *metrics, uint32_t client_id,
                                   memory_order_relaxed);
 }
 
+void ns6_io_metrics_record_output_timed(NS6IOMetrics *metrics,
+                                        uint32_t client_id, uint32_t frames,
+                                        uint64_t cycle, uint64_t output_sample_time,
+                                        bool output_sample_time_valid,
+                                        uint64_t start_ns, uint64_t callback_ns,
+                                        uint64_t deadline_ns) {
+    ns6_io_metrics_record_timed(metrics, client_id, frames, cycle, start_ns,
+                                callback_ns, deadline_ns);
+    NS6IOClientMetrics *slot = client_slot(metrics, client_id);
+    if (!slot) return;
+    atomic_store_explicit(&slot->last_output_sample_time, output_sample_time,
+                          memory_order_relaxed);
+    atomic_store_explicit(&slot->last_output_frames, frames, memory_order_relaxed);
+    atomic_store_explicit(&slot->output_sample_time_valid,
+                          output_sample_time_valid, memory_order_relaxed);
+}
+
 size_t ns6_io_metrics_take_snapshot(NS6IOMetrics *metrics,
                                     NS6IOMetricsSnapshot *snapshots,
                                     size_t capacity) {
@@ -119,6 +139,12 @@ size_t ns6_io_metrics_take_snapshot(NS6IOMetrics *metrics,
                                                      memory_order_relaxed);
         snapshot->last_cycle = atomic_load_explicit(&slot->last_cycle,
                                                      memory_order_relaxed);
+        snapshot->last_output_sample_time = atomic_load_explicit(
+            &slot->last_output_sample_time, memory_order_relaxed);
+        snapshot->last_output_frames = atomic_load_explicit(
+            &slot->last_output_frames, memory_order_relaxed);
+        snapshot->output_sample_time_valid = atomic_load_explicit(
+            &slot->output_sample_time_valid, memory_order_relaxed);
         snapshot->duplicate_cycles = atomic_exchange_explicit(
             &slot->duplicate_cycles, 0, memory_order_relaxed);
         snapshot->skipped_cycles = atomic_exchange_explicit(

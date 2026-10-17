@@ -7,7 +7,7 @@
 
 #include <stdint.h>
 
-#define NS6_SHARED_MEMORY_PROTOCOL_VERSION 3u
+#define NS6_SHARED_MEMORY_PROTOCOL_VERSION 5u
 
 typedef struct {
     uint32_t protocol_version;

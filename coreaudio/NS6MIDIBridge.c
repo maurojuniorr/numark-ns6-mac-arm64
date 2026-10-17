@@ -20,14 +20,12 @@
 #include <unistd.h>
 
 
+#if !NS6_DEVICE_SERVICE_BUILD
 #define DRIVER_PORT 48238
 #define BRIDGE_PORT 48239
 #define MIDI_SOCKET_BUFFER (1024 * 1024)
 #define HEARTBEAT_TIMEOUT_MS 2000
-
 static const unsigned char heartbeat_message[]={0xf0,0x7d,0x4e,0x53,0x36,0x48,0xf7};
-
-static volatile sig_atomic_t running=1;
 static int socket_fd=-1;
 static struct sockaddr_in driver_address;
 static _Atomic uint64_t last_heartbeat_ms;
@@ -35,6 +33,8 @@ static _Atomic uint64_t outbound_reports;
 static _Atomic uint64_t outbound_bytes;
 static atomic_bool heartbeat_seen;
 static uint64_t last_activity_log_ms;
+#endif
+static volatile sig_atomic_t running=1;
 static uint64_t monotonic_ms(void);
 #if NS6_DEVICE_SERVICE_BUILD
 static NS6SharedMemory *shared_memory;
@@ -113,6 +113,7 @@ static void maintain_device_service(void) {
 
 static void stop(int signal_number){(void)signal_number;running=0;}
 static uint64_t monotonic_ms(void){struct timespec now;clock_gettime(CLOCK_MONOTONIC,&now);return (uint64_t)now.tv_sec*1000+(uint64_t)now.tv_nsec/1000000;}
+#if !NS6_DEVICE_SERVICE_BUILD
 static bool is_heartbeat(const unsigned char *data,size_t length){return length==sizeof(heartbeat_message)&&memcmp(data,heartbeat_message,sizeof(heartbeat_message))==0;}
 static unsigned midi_length(unsigned char status){
     switch(status&0xf0){case 0x80:case 0x90:case 0xa0:case 0xb0:case 0xe0:return 3;case 0xc0:case 0xd0:return 2;default:return 0;}
@@ -187,7 +188,29 @@ static bool open_socket(void){
     driver_address=(struct sockaddr_in){.sin_len=sizeof(driver_address),.sin_family=AF_INET,.sin_port=htons(DRIVER_PORT),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
     return true;
 }
+#endif
 int main(void){
+#if NS6_DEVICE_SERVICE_BUILD
+    signal(SIGINT,stop);signal(SIGTERM,stop);
+    if (!start_device_service()) {
+        os_log_error(OS_LOG_DEFAULT, "Numark NS6 device service could not publish shared memory / Mach endpoint");
+        return 1;
+    }
+    os_log(OS_LOG_DEFAULT, "Numark NS6 device service PID %d starting sole USB transport worker", getpid());
+    while (running) {
+        maintain_device_service();
+        sleep(1);
+    }
+    os_log(OS_LOG_DEFAULT, "Numark NS6 device service PID %d stopping USB transport", getpid());
+    ns6_usb_stop();
+    update_device_service_state(false);
+    ns6_transport_bind_shared(NULL, NULL);
+    ns6_usb_bind_shared_capture(NULL, NULL, NULL);
+    ns6_device_service_stop();
+    if (shared_memory_address)
+        mach_vm_deallocate(mach_task_self(), shared_memory_address, shared_memory_allocation_size);
+    return 0;
+#else
     MIDIClientRef client=0;MIDIEndpointRef source=0,destination=0;
     signal(SIGINT,stop);signal(SIGTERM,stop);
     if(!open_socket()||MIDIClientCreate(CFSTR("Numark NS6 MIDI Bridge"),NULL,NULL,&client)!=noErr||MIDISourceCreate(client,CFSTR("Numark NS6"),&source)!=noErr||MIDIDestinationCreate(client,CFSTR("Numark NS6"),receive_from_application,NULL,&destination)!=noErr){fprintf(stderr,"Could not start Numark NS6 MIDI Bridge\n");if(destination)MIDIEndpointDispose(destination);if(source)MIDIEndpointDispose(source);if(client)MIDIClientDispose(client);if(socket_fd>=0)close(socket_fd);return 1;}
@@ -201,15 +224,6 @@ int main(void){
     MIDIObjectSetStringProperty(destination,kMIDIPropertyModel,CFSTR("NS6"));
     MIDIObjectSetStringProperty(destination,kMIDIPropertyDisplayName,CFSTR("Numark NS6 MIDI"));
     MIDIObjectSetIntegerProperty(destination,kMIDIPropertyUniqueID,0x4e533602);
-#if NS6_DEVICE_SERVICE_BUILD
-    if (!start_device_service()) {
-        os_log_error(OS_LOG_DEFAULT, "Numark NS6 device service could not publish shared memory / Mach endpoint");
-        MIDIEndpointDispose(destination); MIDIEndpointDispose(source); MIDIClientDispose(client); close(socket_fd);
-        return 1;
-    }
-    os_log(OS_LOG_DEFAULT, "Numark NS6 device service PID %d starting sole USB transport worker", getpid());
-    maintain_device_service();
-#endif
     fprintf(stderr,"Numark NS6 MIDI Bridge ready\n");
     while(running){
         unsigned char data[64];ssize_t length=recv(socket_fd,data,sizeof(data),0);
@@ -221,29 +235,14 @@ int main(void){
                 atomic_store(&last_heartbeat_ms,0);
             }
             log_outbound_activity();
-#if NS6_DEVICE_SERVICE_BUILD
-            maintain_device_service();
-#endif
             continue;
         }
         unsigned char storage[128];MIDIPacketList *list=(MIDIPacketList *)storage;
         MIDIPacket *packet=MIDIPacketListInit(list);
         if(MIDIPacketListAdd(list,sizeof(storage),packet,0,(UInt16)length,data))MIDIReceived(source,list);
         log_outbound_activity();
-#if NS6_DEVICE_SERVICE_BUILD
-        maintain_device_service();
-#endif
     }
-#if NS6_DEVICE_SERVICE_BUILD
-    os_log(OS_LOG_DEFAULT, "Numark NS6 device service PID %d stopping USB transport", getpid());
-    ns6_usb_stop();
-    update_device_service_state(false);
-    ns6_transport_bind_shared(NULL, NULL);
-    ns6_usb_bind_shared_capture(NULL,NULL,NULL);
-    ns6_device_service_stop();
-    if (shared_memory_address)
-        mach_vm_deallocate(mach_task_self(), shared_memory_address, shared_memory_allocation_size);
-#endif
     MIDIEndpointDispose(destination);MIDIEndpointDispose(source);MIDIClientDispose(client);close(socket_fd);
     return 0;
+#endif
 }

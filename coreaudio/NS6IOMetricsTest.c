@@ -63,5 +63,23 @@ int main(void) {
     assert(snapshot[2].max_callback_ns == 0);
     assert(snapshot[2].max_interval_ns == 0);
     assert(snapshot[2].deadline_misses == 0);
+
+    NS6IOMetrics clients;
+    ns6_io_metrics_init(&clients);
+    ns6_io_metrics_record_output_timed(&clients, 51, 1024, 800, 44100, true,
+                                      1000000, 20000, 23219954);
+    ns6_io_metrics_record_output_timed(&clients, 52, 441, 800, 44100, true,
+                                      1000100, 18000, 10000000);
+    count = ns6_io_metrics_take_snapshot(&clients, snapshot,
+                                         NS6_IO_METRICS_MAX_CLIENTS);
+    assert(count == 2);
+    assert(snapshot[0].client_id == 51);
+    assert(snapshot[0].last_output_sample_time == 44100);
+    assert(snapshot[0].last_output_frames == 1024);
+    assert(snapshot[0].output_sample_time_valid);
+    assert(snapshot[1].client_id == 52);
+    assert(snapshot[1].last_output_sample_time == 44100);
+    assert(snapshot[1].last_output_frames == 441);
+    assert(snapshot[1].output_sample_time_valid);
     return 0;
 }

@@ -12,6 +12,7 @@ typedef struct {
     mach_vm_size_t mapping_size;
     NS6SharedMemory *shared_memory;
     uint64_t session_id;
+    uint64_t client_id;
     bool connected;
 } NS6DeviceClient;
 

@@ -140,6 +140,37 @@ static void test_capture_ring_cross_process_and_silence_fill(void) {
     assert(munmap(memory, sizeof(*memory)) == 0);
 }
 
+static void test_output_mix_cross_process(void) {
+    enum { FRAMES = 128 };
+    NS6SharedMemory *memory = mmap(NULL, sizeof(*memory), PROT_READ | PROT_WRITE,
+                                   MAP_SHARED | MAP_ANON, -1, 0);
+    assert(memory != MAP_FAILED);
+    memset(memory, 0, sizeof(*memory));
+    ns6_shared_memory_init(memory);
+    pid_t writers[2];
+    const float values[2] = {0.2f, 0.3f};
+    for (unsigned n = 0; n < 2; ++n) {
+        writers[n] = fork();
+        assert(writers[n] >= 0);
+        if (writers[n] == 0) {
+            float input[FRAMES * 4];
+            for (unsigned i = 0; i < FRAMES * 4; ++i) input[i] = values[n];
+            AudioStreamBasicDescription format = float_format();
+            _exit(ns6_transport_mix_at_shared(&memory->output, input, 10000, FRAMES, &format) ? 0 : 1);
+        }
+        int status = 0;
+        assert(waitpid(writers[n], &status, 0) == writers[n]);
+        assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
+    assert(ns6_transport_available_shared(&memory->output) == FRAMES);
+    unsigned char output[FRAMES * 12];
+    NS6TransportReader reader = {0};
+    assert(ns6_transport_dequeue_shared(&memory->output, &reader, output, FRAMES) == FRAMES);
+    for (unsigned frame = 0; frame < FRAMES; ++frame)
+        assert(fabsf(decode_sample(output + frame * 12) - 0.5f) < 0.000002f);
+    munmap(memory, sizeof(*memory));
+}
+
 static void test_shared_ring_two_processes(void) {
     enum { FRAMES = 1000000, BLOCK = 64 };
     NS6SharedMemory *memory = mmap(NULL, sizeof(*memory), PROT_READ | PROT_WRITE,
@@ -191,6 +222,7 @@ int main(void) {
     test_shared_capture_ring_reports_empty_and_full();
     test_shared_ring_two_processes();
     test_capture_ring_cross_process_and_silence_fill();
+    test_output_mix_cross_process();
     puts("NS6 shared-memory ring tests passed");
     return 0;
 }
