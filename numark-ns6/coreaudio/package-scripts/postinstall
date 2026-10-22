@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+uid=$(/usr/bin/stat -f '%u' /dev/console)
+for label in io.github.maurojuniorr.numark-ns6-audio-activator \
+             io.github.maurojuniorr.numark-ns6-audio-midi-bridge; do
+  if [ "$uid" -gt 0 ]; then
+    /bin/launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
+  fi
+  /bin/rm -f "/Library/LaunchAgents/$label.plist"
+done
+/usr/bin/killall NumarkNS6AudioActivator >/dev/null 2>&1 || true
+/usr/bin/killall NumarkNS6MIDIBridge >/dev/null 2>&1 || true
+/bin/rm -rf /Library/Audio/Plug-Ins/HAL/NumarkNS6AudioOnly.driver
+/usr/sbin/pkgutil --forget io.github.maurojuniorr.numark-ns6-audio-only >/dev/null 2>&1 || true
+/usr/bin/killall coreaudiod >/dev/null 2>&1 || true

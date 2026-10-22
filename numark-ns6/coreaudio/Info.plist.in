@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleExecutable</key><string>NumarkNS6</string>
+    <key>CFBundleIdentifier</key><string>io.github.maurojuniorr.NumarkNS6.AudioServer</string>
+    <key>CFBundleName</key><string>Numark NS6 Audio</string>
+    <key>CFBundlePackageType</key><string>BNDL</string>
+    <key>CFBundleVersion</key><string>@PROJECT_VERSION@</string>
+    <key>CFPlugInFactories</key>
+    <dict><key>F3B6F32D-38F6-40D7-9E6F-4B6DB8E14756</key><string>NS6AudioDriverFactory</string></dict>
+    <key>CFPlugInTypes</key>
+    <dict><key>443ABAB8-E7B3-491A-B985-BEB9187030DB</key>
+        <array><string>F3B6F32D-38F6-40D7-9E6F-4B6DB8E14756</string></array>
+    </dict>
+    <key>AudioServerPlugIn_LoadingConditions</key>
+    <dict><key>IOService Matching</key>
+        <array><dict>
+            <key>IOProviderClass</key><string>IOUSBHostDevice</string>
+            <key>idVendor</key><integer>5604</integer>
+            <key>idProduct</key><integer>121</integer>
+        </dict></array>
+    </dict>
+</dict>
+</plist>
