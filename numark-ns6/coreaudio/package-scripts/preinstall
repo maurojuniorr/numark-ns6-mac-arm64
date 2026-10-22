@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+uid=$(/usr/bin/stat -f '%u' /dev/console)
+if [ "$uid" -gt 0 ]; then
+  /bin/launchctl bootout "gui/$uid/io.github.maurojuniorr.numark-ns6-midi-bridge" \
+    >/dev/null 2>&1 || true
+fi
+/usr/bin/killall NumarkNS6MIDIBridge >/dev/null 2>&1 || true

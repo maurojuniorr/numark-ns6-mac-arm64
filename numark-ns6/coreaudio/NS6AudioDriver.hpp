@@ -9,6 +9,7 @@ namespace NS6AudioDriver {
 constexpr AudioObjectID kDeviceObjectID = 2;
 constexpr AudioObjectID kOutputStreamObjectID = 3;
 constexpr AudioObjectID kInputStreamObjectID = 4;
+constexpr AudioObjectID kInputDeviceObjectID = 5;
 constexpr UInt32 kSampleRate = 44100;
 constexpr UInt32 kChannels = 4;
 constexpr UInt32 kInputChannels = 2;

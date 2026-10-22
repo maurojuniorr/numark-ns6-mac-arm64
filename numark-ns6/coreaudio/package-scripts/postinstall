@@ -14,3 +14,7 @@ done
 /bin/rm -rf /Library/Audio/Plug-Ins/HAL/NumarkNS6AudioOnly.driver
 /usr/sbin/pkgutil --forget io.github.maurojuniorr.numark-ns6-audio-only >/dev/null 2>&1 || true
 /usr/bin/killall coreaudiod >/dev/null 2>&1 || true
+if [ "$uid" -gt 0 ]; then
+  /bin/launchctl bootstrap "gui/$uid" \
+    /Library/LaunchAgents/io.github.maurojuniorr.numark-ns6-midi-bridge.plist
+fi

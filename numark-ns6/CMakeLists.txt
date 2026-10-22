@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(NumarkNS6 VERSION 0.2.14 LANGUAGES CXX)
+project(NumarkNS6 VERSION 0.2.18 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -102,6 +102,10 @@ if(NS6_ENABLE_SANITIZERS)
     target_link_options(controller_activation_tests PRIVATE -fsanitize=address,undefined)
 endif()
 
+add_executable(audio_keepalive_policy_tests tests/audio_keepalive_policy_tests.cpp)
+target_include_directories(audio_keepalive_policy_tests PRIVATE coreaudio)
+target_compile_options(audio_keepalive_policy_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
 add_executable(audio_feedback_tests
     audio-feedback/AudioFeedbackParser.cpp
     audio-feedback/AudioFeedbackPatternPolicy.cpp
@@ -157,6 +161,15 @@ target_link_libraries(ns6_audio_driver PRIVATE ns6_usb_session "-framework CoreA
                                                "-framework CoreFoundation" "-framework IOKit")
 target_compile_options(ns6_audio_driver PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
+add_executable(ns6_midi_bridge midi/MIDIUserSessionBridge.cpp)
+set_target_properties(ns6_midi_bridge PROPERTIES OUTPUT_NAME "NumarkNS6MIDIBridge")
+target_include_directories(ns6_midi_bridge PRIVATE coreaudio)
+target_link_libraries(ns6_midi_bridge PRIVATE "-framework CoreAudio"
+                                              "-framework CoreFoundation"
+                                              "-framework CoreMIDI"
+                                              "-framework IOKit")
+target_compile_options(ns6_midi_bridge PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
 set(NS6_PLUGIN_BUNDLE "${CMAKE_CURRENT_BINARY_DIR}/NumarkNS6.driver")
 configure_file(coreaudio/Info.plist.in "${NS6_PLUGIN_BUNDLE}/Contents/Info.plist" @ONLY)
 add_custom_target(ns6_audio_driver_bundle ALL
@@ -176,6 +189,7 @@ add_test(NAME audio_device_lifecycle_tests COMMAND audio_device_lifecycle_tests)
 add_test(NAME audio_input_tests COMMAND audio_input_tests)
 add_test(NAME audio_input_engine_tests COMMAND audio_input_engine_tests)
 add_test(NAME controller_activation_tests COMMAND controller_activation_tests)
+add_test(NAME audio_keepalive_policy_tests COMMAND audio_keepalive_policy_tests)
 add_executable(midi_input_tests
     midi/MIDIInputParser.cpp
     midi/MIDIInputEventEncoder.cpp

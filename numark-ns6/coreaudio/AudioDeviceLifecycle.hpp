@@ -14,7 +14,7 @@ enum class AudioIOTransition : std::uint8_t {
     ClientNotActive
 };
 
-// Shared by all streams: input and output clients keep one device/session alive.
+// Each CoreAudio device tracks its own clients; the driver shares one USB session.
 class AudioDeviceLifecycle final {
 public:
     AudioIOTransition startIO(std::uint32_t clientID) noexcept;

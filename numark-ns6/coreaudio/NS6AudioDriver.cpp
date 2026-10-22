@@ -49,18 +49,20 @@ constexpr UInt32 kInputMaxTransferFrames = AudioInputReader::kTransferBytes /
 constexpr UInt32 kIOBufferFrames = 512;
 constexpr UInt32 kDeviceLatencyFrames = 256;
 const CFStringRef kDeviceUID = CFSTR("io.github.maurojuniorr.numark-ns6.out");
+const CFStringRef kInputDeviceUID = CFSTR("io.github.maurojuniorr.numark-ns6.in");
 const CFStringRef kModelUID = CFSTR("io.github.maurojuniorr.numark-ns6");
 const CFStringRef kPluginBundleID = CFSTR("io.github.maurojuniorr.NumarkNS6.AudioServer");
 
 struct DriverState {
     AudioServerPlugInHostRef host = nullptr;
     std::mutex mutex;
-    AudioDeviceLifecycle lifecycle;
+    AudioDeviceLifecycle outputLifecycle;
+    AudioDeviceLifecycle inputLifecycle;
     AudioOutputEngine output{kRingCapacityFrames};
     AudioInputEngine input{kRingCapacityFrames, kInputMaxTransferFrames};
     std::unique_ptr<NS6DeviceSession> session;
     std::unique_ptr<AudioTransportRuntime> runtime;
-    UInt32 clients[64]{};
+    struct Client { AudioObjectID device; UInt32 id; } clients[64]{};
     UInt32 clientCount = 0;
     std::atomic<UInt32> references{1};
     std::atomic<bool> running{false};
@@ -74,8 +76,27 @@ IOReturn stopHardware();
 
 bool validObject(AudioObjectID id) noexcept {
     return id == kPluginObjectID || id == NS6AudioDriver::kDeviceObjectID ||
+           id == NS6AudioDriver::kInputDeviceObjectID ||
            id == NS6AudioDriver::kOutputStreamObjectID ||
            id == NS6AudioDriver::kInputStreamObjectID;
+}
+
+bool validDevice(AudioObjectID id) noexcept {
+    return id == NS6AudioDriver::kDeviceObjectID || id == NS6AudioDriver::kInputDeviceObjectID;
+}
+
+AudioDeviceLifecycle& lifecycle(AudioObjectID device) noexcept {
+    return device == NS6AudioDriver::kDeviceObjectID ? gState.outputLifecycle : gState.inputLifecycle;
+}
+
+bool anyActive() noexcept {
+    return gState.outputLifecycle.activeStarts() != 0 || gState.inputLifecycle.activeStarts() != 0;
+}
+
+bool hasClient(AudioObjectID device, UInt32 id) noexcept {
+    for (UInt32 i = 0; i < gState.clientCount; ++i)
+        if (gState.clients[i].device == device && gState.clients[i].id == id) return true;
+    return false;
 }
 
 HRESULT STDMETHODCALLTYPE queryInterface(void* driver, REFIID uuid, LPVOID* out) {
@@ -122,36 +143,35 @@ OSStatus STDMETHODCALLTYPE destroyDevice(AudioServerPlugInDriverRef, AudioObject
 
 OSStatus STDMETHODCALLTYPE addClient(AudioServerPlugInDriverRef, AudioObjectID device,
                                       const AudioServerPlugInClientInfo* info) {
-    if (device != NS6AudioDriver::kDeviceObjectID || info == nullptr)
+    if (!validDevice(device) || info == nullptr)
         return kAudioHardwareBadObjectError;
     std::lock_guard<std::mutex> lock(gState.mutex);
+    if (hasClient(device, info->mClientID)) return noErr;
     if (gState.clientCount == 64) return kAudioHardwareNotReadyError;
-    if (std::find(gState.clients, gState.clients + gState.clientCount, info->mClientID) !=
-        gState.clients + gState.clientCount) return noErr;
-    gState.clients[gState.clientCount++] = info->mClientID;
+    gState.clients[gState.clientCount++] = {device, info->mClientID};
     return noErr;
 }
 
-void notifyRunningChanged() {
+void notifyRunningChanged(AudioObjectID device) {
     if (gState.host == nullptr) return;
     const AudioObjectPropertyAddress address{kAudioDevicePropertyDeviceIsRunning,
         kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
-    gState.host->PropertiesChanged(gState.host, NS6AudioDriver::kDeviceObjectID, 1, &address);
+    gState.host->PropertiesChanged(gState.host, device, 1, &address);
 }
 
 OSStatus STDMETHODCALLTYPE removeClient(AudioServerPlugInDriverRef, AudioObjectID device,
                                          const AudioServerPlugInClientInfo* info) {
-    if (device != NS6AudioDriver::kDeviceObjectID || info == nullptr)
+    if (!validDevice(device) || info == nullptr)
         return kAudioHardwareBadObjectError;
     std::unique_lock<std::mutex> lock(gState.mutex);
     for (UInt32 i = 0; i < gState.clientCount; ++i) {
-        if (gState.clients[i] == info->mClientID) {
-            const auto transition = gState.lifecycle.removeClient(info->mClientID);
+        if (gState.clients[i].device == device && gState.clients[i].id == info->mClientID) {
+            const auto transition = lifecycle(device).removeClient(info->mClientID);
             gState.clients[i] = gState.clients[--gState.clientCount];
             if (transition == AudioIOTransition::LastClientStopped) {
-                const IOReturn result = stopHardware();
+                const IOReturn result = anyActive() ? kIOReturnSuccess : stopHardware();
                 lock.unlock();
-                if (result == kIOReturnSuccess) notifyRunningChanged();
+                if (result == kIOReturnSuccess) notifyRunningChanged(device);
                 return result;
             }
             break;
@@ -169,7 +189,7 @@ OSStatus STDMETHODCALLTYPE abortConfiguration(AudioServerPlugInDriverRef, AudioO
 
 bool hasProperty(AudioObjectID object, const AudioObjectPropertyAddress& a) {
     if (!validObject(object)) return false;
-    if (object == NS6AudioDriver::kDeviceObjectID &&
+    if (validDevice(object) &&
         a.mSelector == kAudioDevicePropertyStreams &&
         a.mScope != kAudioObjectPropertyScopeInput &&
         a.mScope != kAudioObjectPropertyScopeOutput &&
@@ -198,7 +218,7 @@ bool hasProperty(AudioObjectID object, const AudioObjectPropertyAddress& a) {
         case kAudioPlugInPropertyResourceBundle: return object == kPluginObjectID;
         case kAudioObjectPropertyCustomPropertyInfoList: return true;
         case kAudioObjectPropertyControlList:
-            return object == NS6AudioDriver::kDeviceObjectID;
+            return validDevice(object);
         case kAudioDevicePropertyDeviceUID:
         case kAudioDevicePropertyModelUID:
         case kAudioDevicePropertyTransportType:
@@ -219,14 +239,15 @@ bool hasProperty(AudioObjectID object, const AudioObjectPropertyAddress& a) {
         case kAudioDevicePropertyZeroTimeStampPeriod:
         case kAudioDevicePropertyBufferFrameSize:
         case kAudioDevicePropertyBufferFrameSizeRange:
-            return object == NS6AudioDriver::kDeviceObjectID ||
+            return validDevice(object) ||
                    (a.mSelector == kAudioDevicePropertyLatency &&
                     (object == NS6AudioDriver::kInputStreamObjectID ||
                      object == NS6AudioDriver::kOutputStreamObjectID));
         case kAudioDevicePropertyPreferredChannelLayout:
-            return object == NS6AudioDriver::kDeviceObjectID &&
-                   (a.mScope == kAudioObjectPropertyScopeInput ||
-                    a.mScope == kAudioObjectPropertyScopeOutput);
+            return (object == NS6AudioDriver::kDeviceObjectID &&
+                    a.mScope == kAudioObjectPropertyScopeOutput) ||
+                   (object == NS6AudioDriver::kInputDeviceObjectID &&
+                    a.mScope == kAudioObjectPropertyScopeInput);
         case kAudioStreamPropertyIsActive:
         case kAudioStreamPropertyDirection:
         case kAudioStreamPropertyTerminalType:
@@ -275,8 +296,9 @@ OSStatus propertyData(AudioObjectID object, const AudioObjectPropertyAddress& a,
         return noErr;
     }
     if (a.mSelector == kAudioDevicePropertyStreams &&
-        a.mScope != kAudioObjectPropertyScopeOutput &&
-        a.mScope != kAudioObjectPropertyScopeInput) { *size = 0; return noErr; }
+        ((object == NS6AudioDriver::kDeviceObjectID && a.mScope != kAudioObjectPropertyScopeOutput) ||
+         (object == NS6AudioDriver::kInputDeviceObjectID && a.mScope != kAudioObjectPropertyScopeInput)))
+        { *size = 0; return noErr; }
     if (data == nullptr) return kAudioHardwareIllegalOperationError;
     auto copy = [&](const void* source, UInt32 bytes) -> OSStatus {
         if (capacity < bytes) return kAudioHardwareBadPropertySizeError;
@@ -285,17 +307,19 @@ OSStatus propertyData(AudioObjectID object, const AudioObjectPropertyAddress& a,
     switch (a.mSelector) {
         case kAudioObjectPropertyBaseClass: {
             const AudioClassID value = object == kPluginObjectID ? kAudioObjectClassID :
-                object == NS6AudioDriver::kDeviceObjectID ? kAudioDeviceClassID : kAudioStreamClassID;
+                validDevice(object) ? kAudioDeviceClassID : kAudioStreamClassID;
             return copy(&value, sizeof(value));
         }
         case kAudioObjectPropertyClass: {
             const AudioClassID value = object == kPluginObjectID ? kAudioPlugInClassID :
-                object == NS6AudioDriver::kDeviceObjectID ? kAudioDeviceClassID : kAudioStreamClassID;
+                validDevice(object) ? kAudioDeviceClassID : kAudioStreamClassID;
             return copy(&value, sizeof(value));
         }
         case kAudioObjectPropertyOwner: {
             const AudioObjectID value = object == kAudioObjectPlugInObject ? kAudioObjectUnknown :
-                object == NS6AudioDriver::kDeviceObjectID ? kPluginObjectID : NS6AudioDriver::kDeviceObjectID;
+                validDevice(object) ? kPluginObjectID :
+                object == NS6AudioDriver::kInputStreamObjectID ? NS6AudioDriver::kInputDeviceObjectID
+                                                               : NS6AudioDriver::kDeviceObjectID;
             return copy(&value, sizeof(value));
         }
         case kAudioObjectPropertyName:
@@ -309,15 +333,15 @@ OSStatus propertyData(AudioObjectID object, const AudioObjectPropertyAddress& a,
                         ? CFSTR("Numark NS6 In Stream")
                     : object == NS6AudioDriver::kOutputStreamObjectID
                         ? CFSTR("Numark NS6 Out Stream") : object == NS6AudioDriver::kDeviceObjectID
-                            ? CFSTR("Numark NS6") : CFSTR("Numark NS6 Audio Driver");
+                            ? CFSTR("Numark NS6 Output") : object == NS6AudioDriver::kInputDeviceObjectID
+                            ? CFSTR("Numark NS6 Input") : CFSTR("Numark NS6 Audio Driver");
             if (capacity < sizeof(value)) return kAudioHardwareBadPropertySizeError;
             CFRetain(value); std::memcpy(data, &value, sizeof(value)); *size = sizeof(value); return noErr;
         }
         case kAudioPlugInPropertyDeviceList: {
-            const AudioObjectID value = a.mSelector == kAudioPlugInPropertyDeviceList ||
-                object == kAudioObjectPlugInObject ? NS6AudioDriver::kDeviceObjectID
-                : NS6AudioDriver::kOutputStreamObjectID;
-            return copy(&value, sizeof(value));
+            const AudioObjectID values[]{NS6AudioDriver::kDeviceObjectID,
+                                         NS6AudioDriver::kInputDeviceObjectID};
+            return copy(values, sizeof(values));
         }
         case kAudioPlugInPropertyBundleID: {
             if (capacity < sizeof(kPluginBundleID)) return kAudioHardwareBadPropertySizeError;
@@ -332,6 +356,8 @@ OSStatus propertyData(AudioObjectID object, const AudioObjectPropertyAddress& a,
                 const auto uid = *static_cast<const CFStringRef*>(qualifierData);
                 if (uid != nullptr && CFEqual(uid, kDeviceUID))
                     value = NS6AudioDriver::kDeviceObjectID;
+                else if (uid != nullptr && CFEqual(uid, kInputDeviceUID))
+                    value = NS6AudioDriver::kInputDeviceObjectID;
             }
             return copy(&value, sizeof(value));
         }
@@ -339,12 +365,13 @@ OSStatus propertyData(AudioObjectID object, const AudioObjectPropertyAddress& a,
             if (object == NS6AudioDriver::kOutputStreamObjectID ||
                 object == NS6AudioDriver::kInputStreamObjectID) { *size = 0; return noErr; }
             if (object == kAudioObjectPlugInObject) {
-                const AudioObjectID value = NS6AudioDriver::kDeviceObjectID;
-                return copy(&value, sizeof(value));
+                const AudioObjectID values[]{NS6AudioDriver::kDeviceObjectID,
+                                             NS6AudioDriver::kInputDeviceObjectID};
+                return copy(values, sizeof(values));
             }
-            const AudioObjectID values[]{NS6AudioDriver::kOutputStreamObjectID,
-                                         NS6AudioDriver::kInputStreamObjectID};
-            return copy(values, sizeof(values));
+            const AudioObjectID value = object == NS6AudioDriver::kDeviceObjectID
+                ? NS6AudioDriver::kOutputStreamObjectID : NS6AudioDriver::kInputStreamObjectID;
+            return copy(&value, sizeof(value));
         }
         case kAudioPlugInPropertyResourceBundle: {
             CFStringRef value = CFSTR("");
@@ -353,17 +380,24 @@ OSStatus propertyData(AudioObjectID object, const AudioObjectPropertyAddress& a,
         }
         case kAudioDevicePropertyDeviceUID:
         case kAudioDevicePropertyModelUID: {
-            CFStringRef value = a.mSelector == kAudioDevicePropertyDeviceUID ? kDeviceUID : kModelUID;
+            CFStringRef value = a.mSelector == kAudioDevicePropertyModelUID ? kModelUID
+                : object == NS6AudioDriver::kInputDeviceObjectID ? kInputDeviceUID : kDeviceUID;
             if (capacity < sizeof(value)) return kAudioHardwareBadPropertySizeError;
             CFRetain(value); std::memcpy(data, &value, sizeof(value)); *size = sizeof(value); return noErr;
         }
         case kAudioDevicePropertyTransportType: { const UInt32 v = kAudioDeviceTransportTypeUSB; return copy(&v, sizeof(v)); }
-        case kAudioDevicePropertyRelatedDevices: { const AudioObjectID v = NS6AudioDriver::kDeviceObjectID; return copy(&v, sizeof(v)); }
+        case kAudioDevicePropertyRelatedDevices: {
+            return copy(&object, sizeof(object));
+        }
         case kAudioDevicePropertyClockDomain: { const UInt32 v = 0; return copy(&v, sizeof(v)); }
         case kAudioDevicePropertyDeviceIsAlive: { const UInt32 v = 1; return copy(&v, sizeof(v)); }
-        case kAudioDevicePropertyDeviceIsRunning: { const UInt32 v = gState.running.load(); return copy(&v, sizeof(v)); }
-        case kAudioDevicePropertyDeviceCanBeDefaultDevice:
-        case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice: { const UInt32 v = 1; return copy(&v, sizeof(v)); }
+        case kAudioDevicePropertyDeviceIsRunning: {
+            const UInt32 v = lifecycle(object).activeStarts() != 0; return copy(&v, sizeof(v));
+        }
+        case kAudioDevicePropertyDeviceCanBeDefaultDevice: { const UInt32 v = 1; return copy(&v, sizeof(v)); }
+        case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice: {
+            const UInt32 v = object == NS6AudioDriver::kDeviceObjectID; return copy(&v, sizeof(v));
+        }
         case kAudioDevicePropertyIsHidden: { const UInt32 v = 0; return copy(&v, sizeof(v)); }
         case kAudioDevicePropertyClockAlgorithm: {
             const UInt32 v = kAudioDeviceClockAlgorithmSimpleIIR;
@@ -376,7 +410,7 @@ OSStatus propertyData(AudioObjectID object, const AudioObjectPropertyAddress& a,
             return copy(&v, sizeof(v));
         }
         case kAudioDevicePropertyStreams: {
-            const AudioObjectID v = a.mScope == kAudioObjectPropertyScopeInput
+            const AudioObjectID v = object == NS6AudioDriver::kInputDeviceObjectID
                 ? NS6AudioDriver::kInputStreamObjectID : NS6AudioDriver::kOutputStreamObjectID;
             return copy(&v, sizeof(v));
         }
@@ -438,9 +472,9 @@ OSStatus STDMETHODCALLTYPE getPropertySize(AudioServerPlugInDriverRef, AudioObje
         case kAudioPlugInPropertyResourceBundle: *size = sizeof(CFStringRef); break;
         case kAudioObjectPropertyBaseClass: case kAudioObjectPropertyClass:
         case kAudioObjectPropertyOwner:
-        case kAudioPlugInPropertyDeviceList: case kAudioPlugInPropertyTranslateUIDToDevice:
+        case kAudioPlugInPropertyTranslateUIDToDevice:
         case kAudioDevicePropertyTransportType:
-        case kAudioDevicePropertyRelatedDevices: case kAudioDevicePropertyClockDomain:
+        case kAudioDevicePropertyClockDomain:
         case kAudioDevicePropertyDeviceIsAlive: case kAudioDevicePropertyDeviceIsRunning:
         case kAudioDevicePropertyDeviceCanBeDefaultDevice:
         case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice:
@@ -454,17 +488,20 @@ OSStatus STDMETHODCALLTYPE getPropertySize(AudioServerPlugInDriverRef, AudioObje
         case kAudioDevicePropertyNominalSampleRate: *size = sizeof(Float64); break;
         case kAudioDevicePropertyAvailableNominalSampleRates:
         case kAudioDevicePropertyBufferFrameSizeRange: *size = sizeof(AudioValueRange); break;
+        case kAudioPlugInPropertyDeviceList: *size = 2 * sizeof(AudioObjectID); break;
+        case kAudioDevicePropertyRelatedDevices: *size = sizeof(AudioObjectID); break;
         case kAudioObjectPropertyCustomPropertyInfoList:
         case kAudioObjectPropertyControlList:
         case kAudioPlugInPropertyBoxList:
         case kAudioPlugInPropertyClockDeviceList: *size = 0; break;
         case kAudioDevicePropertyStreams:
-            *size = (a->mScope == kAudioObjectPropertyScopeOutput ||
-                     a->mScope == kAudioObjectPropertyScopeInput) ? sizeof(AudioObjectID) : 0;
+            *size = ((object == NS6AudioDriver::kDeviceObjectID &&
+                      a->mScope == kAudioObjectPropertyScopeOutput) ||
+                     (object == NS6AudioDriver::kInputDeviceObjectID &&
+                      a->mScope == kAudioObjectPropertyScopeInput)) ? sizeof(AudioObjectID) : 0;
             break;
         case kAudioObjectPropertyOwnedObjects:
-            *size = object == NS6AudioDriver::kDeviceObjectID
-                ? 2 * sizeof(AudioObjectID) : sizeof(AudioObjectID);
+            *size = object == kPluginObjectID ? 2 * sizeof(AudioObjectID) : sizeof(AudioObjectID);
             break;
         case kAudioDevicePropertyPreferredChannelLayout:
             *size = offsetof(AudioChannelLayout, mChannelDescriptions);
@@ -560,42 +597,42 @@ IOReturn stopHardware() {
 }
 
 OSStatus STDMETHODCALLTYPE startIO(AudioServerPlugInDriverRef, AudioObjectID device, UInt32 client) {
-    if (device != NS6AudioDriver::kDeviceObjectID) return kAudioHardwareBadObjectError;
+    if (!validDevice(device)) return kAudioHardwareBadObjectError;
     std::unique_lock<std::mutex> lock(gState.mutex);
-    if (std::find(gState.clients, gState.clients + gState.clientCount, client) ==
-        gState.clients + gState.clientCount) return kAudioHardwareBadObjectError;
-    const auto transition = gState.lifecycle.startIO(client);
+    if (!hasClient(device, client)) return kAudioHardwareBadObjectError;
+    const bool wasIdle = !anyActive();
+    const auto transition = lifecycle(device).startIO(client);
     if (transition == AudioIOTransition::Rejected) return kAudioHardwareBadObjectError;
-    if (transition != AudioIOTransition::FirstClientStarted) return noErr;
-    const IOReturn result = startHardware();
-    if (result != kIOReturnSuccess) {
-        os_log_error(OS_LOG_DEFAULT, "NS6 StartIO failed client=%{public}u status=%{public}d", client, result);
-        gState.lifecycle.stopIO(client);
-        return result;
+    if (wasIdle) {
+        const IOReturn result = startHardware();
+        if (result != kIOReturnSuccess) {
+            os_log_error(OS_LOG_DEFAULT, "NS6 StartIO failed device=%{public}u client=%{public}u status=%{public}d", device, client, result);
+            lifecycle(device).stopIO(client);
+            return result;
+        }
     }
-    os_log_info(OS_LOG_DEFAULT, "NS6 StartIO started client=%{public}u", client);
+    os_log_info(OS_LOG_DEFAULT, "NS6 StartIO started device=%{public}u client=%{public}u", device, client);
     lock.unlock();
-    notifyRunningChanged();
+    if (transition == AudioIOTransition::FirstClientStarted) notifyRunningChanged(device);
     return noErr;
 }
 OSStatus STDMETHODCALLTYPE stopIO(AudioServerPlugInDriverRef, AudioObjectID device, UInt32 client) {
-    if (device != NS6AudioDriver::kDeviceObjectID) return kAudioHardwareBadObjectError;
+    if (!validDevice(device)) return kAudioHardwareBadObjectError;
     std::unique_lock<std::mutex> lock(gState.mutex);
-    if (std::find(gState.clients, gState.clients + gState.clientCount, client) ==
-        gState.clients + gState.clientCount) return kAudioHardwareBadObjectError;
-    const auto transition = gState.lifecycle.stopIO(client);
+    if (!hasClient(device, client)) return kAudioHardwareBadObjectError;
+    const auto transition = lifecycle(device).stopIO(client);
     if (transition == AudioIOTransition::ClientNotActive) return noErr;
     if (transition == AudioIOTransition::LastClientStopped) {
-        const IOReturn result = stopHardware();
+        const IOReturn result = anyActive() ? kIOReturnSuccess : stopHardware();
         lock.unlock();
-        if (result == kIOReturnSuccess) notifyRunningChanged();
+        if (result == kIOReturnSuccess) notifyRunningChanged(device);
         return result;
     }
     return noErr;
 }
 OSStatus STDMETHODCALLTYPE zeroTimestamp(AudioServerPlugInDriverRef, AudioObjectID device, UInt32,
                                           Float64* sample, UInt64* host, UInt64* seed) {
-    if (device != NS6AudioDriver::kDeviceObjectID || sample == nullptr || host == nullptr || seed == nullptr)
+    if (!validDevice(device) || sample == nullptr || host == nullptr || seed == nullptr)
         return kAudioHardwareIllegalOperationError;
     const UInt64 now = mach_absolute_time();
     mach_timebase_info_data_t timebase{};
@@ -611,8 +648,9 @@ OSStatus STDMETHODCALLTYPE zeroTimestamp(AudioServerPlugInDriverRef, AudioObject
 OSStatus STDMETHODCALLTYPE willDo(AudioServerPlugInDriverRef, AudioObjectID device, UInt32,
                                    UInt32 op, Boolean* yes, Boolean* inPlace) {
     if (yes == nullptr || inPlace == nullptr) return kAudioHardwareIllegalOperationError;
-    *yes = device == NS6AudioDriver::kDeviceObjectID &&
-           (op == kAudioServerPlugInIOOperationWriteMix ||
+    *yes = (device == NS6AudioDriver::kDeviceObjectID &&
+            op == kAudioServerPlugInIOOperationWriteMix) ||
+           (device == NS6AudioDriver::kInputDeviceObjectID &&
             op == kAudioServerPlugInIOOperationReadInput);
     *inPlace = true;
     return noErr;
@@ -622,12 +660,13 @@ OSStatus STDMETHODCALLTYPE beginIO(AudioServerPlugInDriverRef, AudioObjectID, UI
 OSStatus STDMETHODCALLTYPE doIO(AudioServerPlugInDriverRef, AudioObjectID device, AudioObjectID stream,
                                  UInt32, UInt32 op, UInt32 frames,
                                  const AudioServerPlugInIOCycleInfo*, void* mainBuffer, void*) {
-    if (device != NS6AudioDriver::kDeviceObjectID) return noErr;
-    if (stream == NS6AudioDriver::kOutputStreamObjectID &&
+    if (device == NS6AudioDriver::kDeviceObjectID &&
+        stream == NS6AudioDriver::kOutputStreamObjectID &&
         op == kAudioServerPlugInIOOperationWriteMix)
         return NS6AudioDriver::processOutputMix(gState.output, op, frames,
                                                  static_cast<const Float32*>(mainBuffer));
-    if (stream == NS6AudioDriver::kInputStreamObjectID &&
+    if (device == NS6AudioDriver::kInputDeviceObjectID &&
+        stream == NS6AudioDriver::kInputStreamObjectID &&
         op == kAudioServerPlugInIOOperationReadInput)
         return NS6AudioDriver::processInput(gState.input, op, frames,
                                              static_cast<Float32*>(mainBuffer));
