@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+uid=$(/usr/bin/stat -f '%u' /dev/console)
+/bin/launchctl bootout system/io.github.maurojuniorr.numark-ns6-device-service \
+  >/dev/null 2>&1 || true
+if [ "$uid" -gt 0 ]; then
+  /bin/launchctl bootout "gui/$uid/io.github.maurojuniorr.numark-ns6-midi-bridge" \
+    >/dev/null 2>&1 || true
+  /bin/launchctl bootout "gui/$uid/io.github.maurojuniorr.numark-ns6-audio-activator" \
+    >/dev/null 2>&1 || true
+  /bin/launchctl bootout "gui/$uid/io.github.maurojuniorr.numark-ns6-audio-midi-bridge" \
+    >/dev/null 2>&1 || true
+fi
+/usr/bin/killall NumarkNS6DeviceService NumarkNS6MIDIBridge NumarkNS6AudioActivator \
+  >/dev/null 2>&1 || true
