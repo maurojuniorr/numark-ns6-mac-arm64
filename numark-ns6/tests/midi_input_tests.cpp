@@ -43,8 +43,13 @@ int main() {
 
     assert(parser.feedReport(nullptr, 42, output.data()) == 0);
     assert(parser.feedReport(report.data(), 0, output.data()) == 0);
+    report[0] = 0xb1;
+    report[1] = 0x00;
+    report[2] = 0x40;
     report[41] = 0xfd;
-    assert(parser.feedReport(report.data(), report.size(), output.data()) == 0);
+    assert(parser.feedReport(report.data(), report.size(), output.data()) == 3);
+    assert((std::array<std::uint8_t, 3>{output[0], output[1], output[2]} ==
+            std::array<std::uint8_t, 3>{0xb1, 0x00, 0x40}));
     report[41] = 0;
     assert(parser.feedReport(report.data(), report.size() - 1, output.data()) == 0);
 

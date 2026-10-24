@@ -4,12 +4,18 @@
 
 #include <array>
 #include <cassert>
+#include <CoreAudio/AudioHardware.h>
 
 extern "C" void* NS6AudioDriverFactory(CFAllocatorRef allocator, CFUUIDRef type);
 
 namespace {
 AudioObjectID gChangedObject = kAudioObjectUnknown;
 AudioObjectPropertySelector gChangedSelector = 0;
+
+void encodeLane(std::uint8_t* lane, std::uint32_t sample) {
+    for (unsigned bit = 0; bit < 24; ++bit)
+        lane[bit] = static_cast<std::uint8_t>((sample >> (23 - bit)) & 1u);
+}
 
 OSStatus capturePropertiesChanged(AudioServerPlugInHostRef, AudioObjectID object,
                                   UInt32 count, const AudioObjectPropertyAddress* addresses) {
@@ -58,6 +64,19 @@ int main() {
         &deviceList, 0, nullptr, sizeof(devices), &propertySize, devices) == noErr);
     assert(devices[0] == NS6AudioDriver::kDeviceObjectID);
     assert(devices[1] == NS6AudioDriver::kInputDeviceObjectID);
+    const AudioObjectPropertyAddress timestampPeriod{kAudioDevicePropertyZeroTimeStampPeriod,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+    for (const auto device : devices) {
+        UInt32 period = 0;
+        assert((*driver)->GetPropertyData(driver, device, 0, &timestampPeriod, 0, nullptr,
+            sizeof(period), &propertySize, &period) == noErr);
+        assert(period == 16384);
+        Float64 sample = -1;
+        UInt64 hostTime = 0, seed = 0;
+        assert((*driver)->GetZeroTimeStamp(driver, device, 0, &sample, &hostTime, &seed) == noErr);
+        assert(sample >= 0 && static_cast<UInt64>(sample) % period == 0);
+        assert(hostTime != 0 && seed != 0);
+    }
     const AudioObjectPropertyAddress inputOwner{kAudioObjectPropertyOwner,
         kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
     AudioObjectID owner = kAudioObjectUnknown;
@@ -122,10 +141,7 @@ int main() {
     for (const auto [object, selector] : {
              std::pair<AudioObjectID, AudioObjectPropertySelector>{kAudioObjectPlugInObject, kAudioPlugInPropertyBoxList},
              {kAudioObjectPlugInObject, kAudioPlugInPropertyClockDeviceList},
-             {kAudioObjectPlugInObject, kAudioObjectPropertyCustomPropertyInfoList},
-             {NS6AudioDriver::kDeviceObjectID, kAudioObjectPropertyControlList},
-             {NS6AudioDriver::kDeviceObjectID, kAudioObjectPropertyCustomPropertyInfoList},
-             {NS6AudioDriver::kOutputStreamObjectID, kAudioObjectPropertyCustomPropertyInfoList}}) {
+             {NS6AudioDriver::kDeviceObjectID, kAudioObjectPropertyControlList}}) {
         const AudioObjectPropertyAddress emptyList{selector, kAudioObjectPropertyScopeGlobal,
                                                     kAudioObjectPropertyElementMain};
         assert((*driver)->HasProperty(driver, object, 0, &emptyList));
@@ -137,6 +153,54 @@ int main() {
                                           sizeof(noItems), &propertySize, &noItems) == noErr);
         assert(propertySize == 0);
     }
+
+    const AudioObjectPropertyAddress statusList{kAudioObjectPropertyCustomPropertyInfoList,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+    assert((*driver)->GetPropertyDataSize(driver, NS6AudioDriver::kDeviceObjectID, 0,
+        &statusList, 0, nullptr, &propertySize) == noErr);
+    assert(propertySize == 3 * sizeof(AudioServerPlugInCustomPropertyInfo));
+    AudioServerPlugInCustomPropertyInfo statusProperties[3]{};
+    assert((*driver)->GetPropertyData(driver, NS6AudioDriver::kDeviceObjectID, 0,
+        &statusList, 0, nullptr, sizeof(statusProperties), &propertySize, statusProperties) == noErr);
+    assert(statusProperties[0].mSelector == 'ns6f');
+    assert(statusProperties[1].mSelector == 'ns6c');
+    assert(statusProperties[2].mSelector == 'ns6v');
+    for (const auto selector : {'ns6f', 'ns6c', 'ns6v'}) {
+        const AudioObjectPropertyAddress property{static_cast<AudioObjectPropertySelector>(selector),
+            kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+        CFStringRef value = nullptr;
+        assert((*driver)->GetPropertyData(driver, NS6AudioDriver::kDeviceObjectID, 0,
+            &property, 0, nullptr, sizeof(value), &propertySize, &value) == noErr);
+        assert(value != nullptr);
+        CFRelease(value);
+    }
+    const AudioObjectPropertyAddress activeClients{'ns6c', kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain};
+    const AudioServerPlugInClientInfo mixxx{123, 321, true, CFSTR("org.mixxx.mixxx")};
+    const AudioServerPlugInClientInfo opera{124, 322, true, CFSTR("com.operasoftware.Opera")};
+    assert((*driver)->AddDeviceClient(driver, NS6AudioDriver::kDeviceObjectID, &mixxx) == noErr);
+    assert((*driver)->AddDeviceClient(driver, NS6AudioDriver::kDeviceObjectID, &opera) == noErr);
+    const AudioServerPlugInIOCycleInfo cycle{};
+    assert((*driver)->BeginIOOperation(driver, NS6AudioDriver::kDeviceObjectID, mixxx.mClientID,
+        kAudioServerPlugInIOOperationWriteMix, 512, &cycle) == noErr);
+    assert((*driver)->BeginIOOperation(driver, NS6AudioDriver::kDeviceObjectID, opera.mClientID,
+        kAudioServerPlugInIOOperationWriteMix, 512, &cycle) == noErr);
+    auto clientList = [&] {
+        CFStringRef text = nullptr;
+        assert((*driver)->GetPropertyData(driver, NS6AudioDriver::kDeviceObjectID, 0,
+            &activeClients, 0, nullptr, sizeof(text), &propertySize, &text) == noErr);
+        return text;
+    };
+    CFStringRef list = clientList();
+    assert(CFStringFind(list, CFSTR("321|org.mixxx.mixxx"), 0).location != kCFNotFound);
+    assert(CFStringFind(list, CFSTR("322|com.operasoftware.Opera"), 0).location != kCFNotFound);
+    CFRelease(list);
+    assert((*driver)->RemoveDeviceClient(driver, NS6AudioDriver::kDeviceObjectID, &mixxx) == noErr);
+    list = clientList();
+    assert(CFStringFind(list, CFSTR("321|"), 0).location == kCFNotFound);
+    assert(CFStringFind(list, CFSTR("322|"), 0).location != kCFNotFound);
+    CFRelease(list);
+    assert((*driver)->RemoveDeviceClient(driver, NS6AudioDriver::kDeviceObjectID, &opera) == noErr);
 
     for (const AudioObjectPropertySelector selector :
          std::array<AudioObjectPropertySelector, 3>{kAudioDevicePropertyClockAlgorithm,
@@ -230,6 +294,40 @@ int main() {
     assert((*driver)->GetPropertyData(driver, NS6AudioDriver::kInputDeviceObjectID, 0,
         &inputLayoutProperty, 0, nullptr, sizeof(layout), &propertySize, &layout) == noErr);
     assert(layout.mChannelLayoutTag == kAudioChannelLayoutTag_Stereo);
+    const AudioObjectPropertyAddress inputStereoChannels{kAudioDevicePropertyPreferredChannelsForStereo,
+        kAudioObjectPropertyScopeInput, kAudioObjectPropertyElementMain};
+    assert((*driver)->HasProperty(driver, NS6AudioDriver::kInputDeviceObjectID, 0,
+        &inputStereoChannels));
+    assert((*driver)->GetPropertyDataSize(driver, NS6AudioDriver::kInputDeviceObjectID, 0,
+        &inputStereoChannels, 0, nullptr, &propertySize) == noErr);
+    assert(propertySize == 2 * sizeof(UInt32));
+    UInt32 stereoChannels[2]{};
+    assert((*driver)->GetPropertyData(driver, NS6AudioDriver::kInputDeviceObjectID, 0,
+        &inputStereoChannels, 0, nullptr, sizeof(stereoChannels), &propertySize,
+        stereoChannels) == noErr);
+    assert(stereoChannels[0] == 1 && stereoChannels[1] == 2);
+    const AudioObjectPropertyAddress inputConfiguration{kAudioDevicePropertyStreamConfiguration,
+        kAudioObjectPropertyScopeInput, kAudioObjectPropertyElementMain};
+    assert((*driver)->HasProperty(driver, NS6AudioDriver::kInputDeviceObjectID, 0,
+        &inputConfiguration));
+    assert((*driver)->GetPropertyDataSize(driver, NS6AudioDriver::kInputDeviceObjectID, 0,
+        &inputConfiguration, 0, nullptr, &propertySize) == noErr);
+    assert(propertySize == offsetof(AudioBufferList, mBuffers) + sizeof(AudioBuffer));
+    AudioBufferList inputBuffers{};
+    assert((*driver)->GetPropertyData(driver, NS6AudioDriver::kInputDeviceObjectID, 0,
+        &inputConfiguration, 0, nullptr, sizeof(inputBuffers), &propertySize,
+        &inputBuffers) == noErr);
+    assert(inputBuffers.mNumberBuffers == 1 && inputBuffers.mBuffers[0].mNumberChannels == 2);
+    const AudioObjectPropertyAddress inputOutputConfiguration{kAudioDevicePropertyStreamConfiguration,
+        kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain};
+    assert((*driver)->GetPropertyDataSize(driver, NS6AudioDriver::kInputDeviceObjectID, 0,
+        &inputOutputConfiguration, 0, nullptr, &propertySize) == noErr);
+    assert(propertySize == offsetof(AudioBufferList, mBuffers));
+    AudioBufferList emptyConfiguration{};
+    assert((*driver)->GetPropertyData(driver, NS6AudioDriver::kInputDeviceObjectID, 0,
+        &inputOutputConfiguration, 0, nullptr, sizeof(emptyConfiguration), &propertySize,
+        &emptyConfiguration) == noErr);
+    assert(emptyConfiguration.mNumberBuffers == 0);
     assert((*driver)->GetPropertyData(driver, NS6AudioDriver::kDeviceObjectID, 0,
         &outputLayoutProperty, 0, nullptr, sizeof(layout), &propertySize, &layout) == noErr);
     assert(layout.mChannelLayoutTag == kAudioChannelLayoutTag_DiscreteInOrder);
@@ -263,11 +361,21 @@ int main() {
     assert(NS6AudioDriver::processOutputMix(engine, kAudioServerPlugInIOOperationProcessOutput,
                                             2, nullptr) == noErr);
 
-    AudioInputEngine input(8, 1);
+    AudioInputEngine input(8, 2);
     std::array<Float32, 4> capturedInput{1.0F, 1.0F, 1.0F, 1.0F};
     assert(NS6AudioDriver::processInput(input, kAudioServerPlugInIOOperationReadInput,
                                         2, capturedInput.data()) == noErr);
     assert((capturedInput == std::array<Float32, 4>{0, 0, 0, 0}));
+
+    std::array<std::uint8_t, 2 * AudioInputDecoder::kSourceStrideBytes> usbInput{};
+    encodeLane(usbInput.data(), 0x400000);
+    encodeLane(usbInput.data() + 32, 0xc00000);
+    encodeLane(usbInput.data() + 64, 0x7fffff);
+    encodeLane(usbInput.data() + 96, 0x800000);
+    assert(input.publishUSBBlock(usbInput.data(), usbInput.size()) == 2);
+    assert(NS6AudioDriver::processInput(input, kAudioServerPlugInIOOperationReadInput,
+                                        2, capturedInput.data()) == noErr);
+    assert((capturedInput == std::array<Float32, 4>{0.5F, -0.5F, 1.0F - 1.0F / 8388608.0F, -1.0F}));
     assert(NS6AudioDriver::processInput(input, kAudioServerPlugInIOOperationReadInput,
                                         2, nullptr) == kAudioHardwareIllegalOperationError);
 }

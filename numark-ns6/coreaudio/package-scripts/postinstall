@@ -1,6 +1,11 @@
 #!/bin/sh
 set -eu
 
+# Install the app from data so older standalone bundle versions cannot block updates.
+/usr/bin/killall NumarkNS6Status >/dev/null 2>&1 || true
+/bin/rm -rf '/Applications/Numark NS6 Status.app'
+/usr/bin/tar -xzf '/Library/Application Support/Numark NS6/NumarkNS6Status.tar.gz' -C /Applications
+
 uid=$(/usr/bin/stat -f '%u' /dev/console)
 for label in io.github.maurojuniorr.numark-ns6-audio-activator \
              io.github.maurojuniorr.numark-ns6-audio-midi-bridge; do
@@ -9,10 +14,16 @@ for label in io.github.maurojuniorr.numark-ns6-audio-activator \
   fi
   /bin/rm -f "/Library/LaunchAgents/$label.plist"
 done
-/usr/bin/killall NumarkNS6AudioActivator >/dev/null 2>&1 || true
-/usr/bin/killall NumarkNS6MIDIBridge >/dev/null 2>&1 || true
-/bin/rm -rf /Library/Audio/Plug-Ins/HAL/NumarkNS6AudioOnly.driver
+/bin/launchctl bootout system/io.github.maurojuniorr.numark-ns6-device-service \
+  >/dev/null 2>&1 || true
+/usr/bin/killall NumarkNS6DeviceService NumarkNS6AudioActivator NumarkNS6MIDIBridge \
+  >/dev/null 2>&1 || true
+/bin/rm -f /Library/LaunchDaemons/io.github.maurojuniorr.numark-ns6-device-service.plist
+/bin/rm -rf /Library/Audio/Plug-Ins/HAL/NumarkNS6M1.driver \
+  /Library/Audio/Plug-Ins/HAL/NumarkNS6AudioOnly.driver
 /usr/sbin/pkgutil --forget io.github.maurojuniorr.numark-ns6-audio-only >/dev/null 2>&1 || true
+/usr/sbin/pkgutil --forget io.github.maurojuniorr.numark-ns6.experimental >/dev/null 2>&1 || true
+/usr/bin/pkill -f '^Core Audio Driver \(NumarkNS6\.driver\)$' >/dev/null 2>&1 || true
 /usr/bin/killall coreaudiod >/dev/null 2>&1 || true
 if [ "$uid" -gt 0 ]; then
   /bin/launchctl bootstrap "gui/$uid" \

@@ -13,7 +13,7 @@ MIDIInputReader::~MIDIInputReader() {
 }
 
 MIDIInputReaderStats MIDIInputReader::stats() const noexcept {
-    return {reports_, publishedBatches_, transferErrors_, lastError_};
+    return {reports_, publishedBatches_, transferErrors_, lastError_, nonzeroTerminators_};
 }
 
 IOReturn MIDIInputReader::start(NS6DeviceSession& session, MIDIInputSink& sink) noexcept {
@@ -33,7 +33,7 @@ IOReturn MIDIInputReader::start(NS6DeviceSession& session, MIDIInputSink& sink) 
     parser_ = MIDIInputParser{};
     nextSubmitSequence_ = 0;
     nextProcessSequence_ = 0;
-    reports_ = publishedBatches_ = transferErrors_ = 0;
+    reports_ = publishedBatches_ = transferErrors_ = nonzeroTerminators_ = 0;
     lastError_ = kIOReturnSuccess;
     firstMIDIMessageLogged_ = false;
 
@@ -124,6 +124,7 @@ void MIDIInputReader::drainCompletions() noexcept {
 
         if (next->status == kIOReturnSuccess && next->bytes == MIDIInputParser::kReportBytes) {
             ++reports_;
+            if (next->data[MIDIInputParser::kReportPayloadBytes] != 0) ++nonzeroTerminators_;
             std::uint8_t messages[MIDIInputParser::kMaximumOutputBytes]{};
             const std::size_t length = parser_.feedReport(next->data, next->bytes, messages);
             if (length != 0 && sink_ != nullptr) {

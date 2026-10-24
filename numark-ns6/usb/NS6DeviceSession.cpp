@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <thread>
 
 namespace {
@@ -21,6 +22,27 @@ bool numberProperty(io_registry_entry_t entry, CFStringRef key, std::uint16_t& v
     CFRelease(property);
     if (valid) value = static_cast<std::uint16_t>(signedValue);
     return valid;
+}
+
+std::uint64_t currentDeviceID() noexcept {
+    io_iterator_t iterator = IO_OBJECT_NULL;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault,
+                                     IOServiceMatching("IOUSBHostDevice"), &iterator) != KERN_SUCCESS)
+        return 0;
+    std::uint64_t found = 0;
+    io_service_t service = IO_OBJECT_NULL;
+    while ((service = IOIteratorNext(iterator)) != IO_OBJECT_NULL) {
+        std::uint16_t vendor = 0;
+        std::uint16_t product = 0;
+        if (numberProperty(service, CFSTR(kUSBVendorID), vendor) &&
+            numberProperty(service, CFSTR(kUSBProductID), product) &&
+            vendor == 0x15e4 && product == 0x0079)
+            (void)IORegistryEntryGetRegistryEntryID(service, &found);
+        IOObjectRelease(service);
+        if (found != 0) break;
+    }
+    IOObjectRelease(iterator);
+    return found;
 }
 
 IOUSBInterfaceInterface** matchingInterface(io_iterator_t iterator, UInt8 wantedNumber,
@@ -126,6 +148,12 @@ NS6DeviceSession::~NS6DeviceSession() {
     close();
 }
 
+bool NS6DeviceSession::devicePresent() noexcept { return currentDeviceID() != 0; }
+
+bool NS6DeviceSession::isCurrentDevice() const noexcept {
+    return opened_ && deviceID_ != 0 && deviceID_ == currentDeviceID();
+}
+
 IOReturn NS6DeviceSession::configureAudioInputMode() noexcept {
     if (!opened_ || interface_ == nullptr) return kIOReturnNotReady;
     UInt8 capability[8]{};
@@ -205,6 +233,15 @@ IOReturn NS6DeviceSession::open() {
         close();
         return result;
     }
+
+    // The NS6's vendor firmware query is diagnostic; failure must not stop audio.
+    UInt8 firmware[8]{};
+    IOUSBDevRequest firmwareRequest{0xc0, 0x56, 0, 0, sizeof(firmware), firmware, 0};
+    if ((*interface_)->ControlRequest(interface_, 0, &firmwareRequest) == kIOReturnSuccess &&
+        firmwareRequest.wLenDone >= 3 && firmware[0] == 0x31 && firmware[1] != 0 &&
+        firmware[2] <= 99)
+        std::snprintf(firmwareVersion_, sizeof(firmwareVersion_), "%u.%u.%u (K1)",
+                      firmware[1], firmware[2] / 10, firmware[2] % 10);
 
     UInt8 endpointCount = 0;
     result = (*interface_)->GetNumEndpoints(interface_, &endpointCount);
@@ -310,6 +347,7 @@ IOReturn NS6DeviceSession::open() {
         close();
         return result;
     }
+    deviceID_ = deviceID;
     return kIOReturnSuccess;
 }
 
@@ -411,5 +449,6 @@ IOReturn NS6DeviceSession::close() noexcept {
     audioOutPipe_ = 0;
     midiInPipe_ = 0;
     midiOutPipe_ = 0;
+    deviceID_ = 0;
     return result;
 }

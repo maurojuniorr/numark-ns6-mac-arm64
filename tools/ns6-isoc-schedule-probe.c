@@ -82,7 +82,7 @@ int main(void)
             (*interface)->Release(interface);
             IOObjectRelease(service);
             IOObjectRelease(it);
-            return 0;
+            return kr == kIOReturnSuccess ? 0 : 1;
         }
         (*interface)->Release(interface);
         IOObjectRelease(service);

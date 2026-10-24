@@ -1,9 +1,13 @@
 #include "AudioInputDecoder.hpp"
+#include "../audio-in/AudioInputReader.hpp"
 
 #include <array>
 #include <cassert>
 #include <cstdint>
 #include <limits>
+
+static_assert(AudioInputReader::kSlotCount == 4,
+              "NS6 capture must keep four bulk-IN reads queued, matching the Ploytec path");
 
 static void encodeLane(std::uint8_t* bytes, std::uint32_t sample) {
     for (unsigned bit = 0; bit < 24; ++bit)

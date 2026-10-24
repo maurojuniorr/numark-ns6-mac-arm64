@@ -42,16 +42,6 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::puts("stage: USB session open");
-    if (activateController) {
-        std::puts("stage: MIDI activation begin");
-        result = ControllerActivation::activate(session);
-        std::printf("stage: MIDI activation result 0x%x\n", result);
-        if (result != kIOReturnSuccess) {
-            std::fprintf(stderr, "controller activation failed: 0x%x\n", result);
-            session.close();
-            return 1;
-        }
-    }
     std::puts("stage: configure input mode");
     result = session.configureAudioInputMode();
     if (result != kIOReturnSuccess) {
@@ -63,6 +53,37 @@ int main(int argc, char** argv) {
 
     AudioOutputRing outputRing(8192, 4);
     AudioPacketPolicy packetPolicy(44100, 8000);
+    if (activateController) {
+        AudioOutWorker primeOutput(session, outputRing, packetPolicy);
+        std::puts("stage: prime audio OUT before controller activation");
+        result = primeOutput.start();
+        if (result != kIOReturnSuccess) {
+            std::fprintf(stderr, "OUT prime failed: 0x%x\n", result);
+            session.close();
+            return 1;
+        }
+        result = primeOutput.stop();
+        if (result != kIOReturnSuccess) {
+            std::fprintf(stderr, "OUT prime did not drain: 0x%x\n", result);
+            std::_Exit(3);
+        }
+        std::puts("stage: MIDI activation begin");
+        result = ControllerActivation::activate(session);
+        std::printf("stage: MIDI activation result 0x%x\n", result);
+        if (result != kIOReturnSuccess) {
+            std::fprintf(stderr, "controller activation failed: 0x%x\n", result);
+            session.close();
+            return 1;
+        }
+        std::puts("stage: reconfigure input mode after activation");
+        result = session.configureAudioInputMode();
+        if (result != kIOReturnSuccess) {
+            std::fprintf(stderr, "audio input mode setup after activation failed: 0x%x\n", result);
+            session.close();
+            return 1;
+        }
+    }
+
     AudioOutWorker output(session, outputRing, packetPolicy);
     if (silentOutput || testTone) {
         std::puts("stage: start silent audio OUT");

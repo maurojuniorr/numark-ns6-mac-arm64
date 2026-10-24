@@ -18,6 +18,7 @@ struct MIDIInputReaderStats final {
     std::uint64_t publishedBatches = 0;
     std::uint64_t transferErrors = 0;
     IOReturn lastError = kIOReturnSuccess;
+    std::uint64_t nonzeroTerminators = 0;
 };
 
 class MIDIInputReader final {
@@ -32,6 +33,7 @@ public:
     IOReturn start(NS6DeviceSession& session, MIDIInputSink& sink) noexcept;
     IOReturn stop() noexcept;
     bool stopped() const noexcept { return session_ == nullptr; }
+    bool needsRecovery() const noexcept { return session_ != nullptr && !running_; }
     MIDIInputReaderStats stats() const noexcept;
 
 private:
@@ -64,5 +66,6 @@ private:
     std::uint64_t reports_ = 0;
     std::uint64_t publishedBatches_ = 0;
     std::uint64_t transferErrors_ = 0;
+    std::uint64_t nonzeroTerminators_ = 0;
     IOReturn lastError_ = kIOReturnSuccess;
 };

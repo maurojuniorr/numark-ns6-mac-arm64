@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleExecutable</key><string>NumarkNS6Status</string>
+  <key>CFBundleIdentifier</key><string>io.github.maurojuniorr.numark-ns6.status.macarm64</string>
+  <key>CFBundleIconFile</key><string>NS6Status</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleName</key><string>Numark NS6 Status</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleSupportedPlatforms</key><array><string>MacOSX</string></array>
+  <key>CFBundleShortVersionString</key><string>0.2.104</string>
+  <key>CFBundleVersion</key><string>104</string>
+  <key>LSMinimumSystemVersion</key><string>15.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSPrincipalClass</key><string>NSApplication</string>
+  <key>NSApplicationSupportsSecureRestorableState</key><true/>
+</dict></plist>

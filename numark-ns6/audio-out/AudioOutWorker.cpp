@@ -178,24 +178,10 @@ void AudioOutWorker::didComplete(Slot& slot, IOReturn status) noexcept {
     }
     transferSlots_.complete(slot.index);
     if (status == kIOReturnSuccess) {
-        const auto completed = completed_.fetch_add(1, std::memory_order_relaxed) + 1;
+        completed_.fetch_add(1, std::memory_order_relaxed);
         const auto* batch = transferSlots_.packet(slot.index);
         if (batch != nullptr)
             ringUnderrunFrames_.fetch_add(batch->missingFrames(), std::memory_order_relaxed);
-        if (completed % 250 == 0) {
-            const auto queued = ring_.availableFrames();
-            os_log(OS_LOG_DEFAULT,
-                   "NS6 OUT health: completed %{public}llu submitted %{public}llu non-silent %{public}llu failures %{public}llu; ring underrun %{public}llu frames; queue %u; measured/effective clock %.3f/%.3f Hz; source step %.8f",
-                   static_cast<unsigned long long>(completed),
-                   static_cast<unsigned long long>(submitted_.load(std::memory_order_relaxed)),
-                   static_cast<unsigned long long>(nonSilentSubmitted_.load(std::memory_order_relaxed)),
-                   static_cast<unsigned long long>(failures_.load(std::memory_order_relaxed)),
-                   static_cast<unsigned long long>(ringUnderrunFrames_.exchange(0, std::memory_order_relaxed)),
-                   queued,
-                   static_cast<double>(packetPolicy_.measuredClockMilliHz()) / 1000.0,
-                   static_cast<double>(packetPolicy_.effectiveClockMilliHz()) / 1000.0,
-                   packetPolicy_.sourceFramesPerOutputFrame(queued));
-        }
     } else {
         failures_.fetch_add(1, std::memory_order_relaxed);
         os_log_error(OS_LOG_DEFAULT,

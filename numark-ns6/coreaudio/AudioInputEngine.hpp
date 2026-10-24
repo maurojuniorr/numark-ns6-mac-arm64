@@ -26,6 +26,9 @@ public:
     std::uint64_t malformedBlocks() const noexcept {
         return malformedBlocks_.load(std::memory_order_relaxed);
     }
+    std::uint64_t decodedNonZeroSamples() const noexcept {
+        return decodedNonZeroSamples_.load(std::memory_order_relaxed);
+    }
 
 private:
     AudioOutputRing ring_;
@@ -34,4 +37,5 @@ private:
     std::atomic<std::uint64_t> droppedCaptureFrames_{0};
     std::atomic<std::uint64_t> starvationFrames_{0};
     std::atomic<std::uint64_t> malformedBlocks_{0};
+    std::atomic<std::uint64_t> decodedNonZeroSamples_{0};
 };

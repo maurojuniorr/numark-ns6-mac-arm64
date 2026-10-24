@@ -11,6 +11,7 @@ int main() {
     assert(audioKeepaliveAction(unknown, unknown) == AudioKeepaliveAction::None);
     assert(audioKeepaliveAction(unknown, 42) == AudioKeepaliveAction::Start);
     assert(audioKeepaliveAction(42, 42) == AudioKeepaliveAction::None);
+    assert(audioKeepaliveAction(42, 42, false) == AudioKeepaliveAction::Stop);
     assert(audioKeepaliveAction(42, unknown) == AudioKeepaliveAction::Stop);
     assert(audioKeepaliveAction(42, 43) == AudioKeepaliveAction::Stop);
 }

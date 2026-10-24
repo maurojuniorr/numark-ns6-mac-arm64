@@ -2,6 +2,7 @@
 
 #include <IOKit/IOKitLib.h>
 #include <IOKit/usb/IOUSBLib.h>
+#include <cstdint>
 
 class NS6DeviceSession final {
 public:
@@ -11,6 +12,8 @@ public:
     NS6DeviceSession& operator=(const NS6DeviceSession&) = delete;
 
     IOReturn open();
+    bool isCurrentDevice() const noexcept;
+    static bool devicePresent() noexcept;
     IOReturn configureAudioInputMode() noexcept;
     // Call only after endpoint workers cancel and drain their in-flight requests.
     IOReturn close() noexcept;
@@ -26,6 +29,7 @@ public:
     IOUSBInterfaceInterface** auxiliaryInterface() const noexcept { return auxiliaryInterface_; }
     UInt8 feedbackPipe() const noexcept { return feedbackPipe_; }
     UInt8 audioInPipe() const noexcept { return audioInPipe_; }
+    const char* firmwareVersion() const noexcept { return firmwareVersion_; }
     CFRunLoopSourceRef auxiliaryAsyncEventSource() const noexcept {
         return auxiliaryAsyncEventSource_;
     }
@@ -44,8 +48,10 @@ private:
     UInt8 feedbackPipe_ = 0;
     UInt8 audioInPipe_ = 0;
     bool auxiliaryOpened_ = false;
+    char firmwareVersion_[32]{};
     UInt16 previousAudioMode_ = 0;
     bool audioModeChanged_ = false;
+    std::uint64_t deviceID_ = 0;
     CFRunLoopRef auxiliaryEventRunLoop_ = nullptr;
     UInt32 auxiliaryEventClients_ = 0;
 };

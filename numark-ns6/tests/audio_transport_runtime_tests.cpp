@@ -8,6 +8,7 @@ namespace {
 
 int main() {
     NS6DeviceSession session;
+    assert(!session.isCurrentDevice());
     AudioOutputEngine engine(32);
     AudioInputEngine input(32, AudioInputReader::kTransferBytes /
                                 AudioInputDecoder::kSourceStrideBytes);

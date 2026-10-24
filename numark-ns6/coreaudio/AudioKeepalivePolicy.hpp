@@ -8,8 +8,10 @@ namespace ns6 {
 enum class AudioKeepaliveAction { None, Start, Stop };
 
 constexpr AudioKeepaliveAction audioKeepaliveAction(std::uint32_t activeDevice,
-                                                    std::uint32_t discoveredDevice) noexcept {
+                                                    std::uint32_t discoveredDevice,
+                                                    bool sameUSBGeneration = true) noexcept {
     if (activeDevice != 0 && activeDevice != discoveredDevice) return AudioKeepaliveAction::Stop;
+    if (activeDevice != 0 && !sameUSBGeneration) return AudioKeepaliveAction::Stop;
     if (activeDevice == 0 && discoveredDevice != 0) return AudioKeepaliveAction::Start;
     return AudioKeepaliveAction::None;
 }

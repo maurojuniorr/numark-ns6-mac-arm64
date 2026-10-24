@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(NumarkNS6 VERSION 0.2.18 LANGUAGES CXX)
+project(NumarkNS6 VERSION 0.2.45 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -138,6 +138,10 @@ add_library(ns6_usb_session STATIC
     coreaudio/AudioOutputEngine.cpp
     coreaudio/AudioTransportRuntime.cpp
     midi/ControllerActivation.cpp
+    midi/MIDIInputParser.cpp
+    midi/MIDIInputReader.cpp
+    midi/LocalMIDIForwarder.cpp
+    midi/MIDIOutputWriter.cpp
     usb/NS6DeviceSession.cpp)
 target_include_directories(ns6_usb_session PUBLIC audio-out audio-feedback audio-in coreaudio midi usb)
 target_compile_options(ns6_usb_session PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -205,6 +209,7 @@ target_link_libraries(audio_driver_contract_tests PRIVATE ns6_usb_session
     "-framework IOKit")
 target_compile_options(audio_driver_contract_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME audio_driver_contract_tests COMMAND audio_driver_contract_tests)
+add_test(NAME uninstall_driver_tests COMMAND /bin/sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/uninstall_driver_tests.sh")
 add_test(NAME audio_driver_bundle_signature
     COMMAND /usr/bin/codesign --verify --deep --strict "${NS6_PLUGIN_BUNDLE}")
 

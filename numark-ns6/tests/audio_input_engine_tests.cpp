@@ -18,6 +18,7 @@ int main() {
     encodeLane(block.data() + 96, 0x800000);
 
     assert(engine.publishUSBBlock(block.data(), block.size()) == 2);
+    assert(engine.decodedNonZeroSamples() == 4);
     std::array<float, 6> input{};
     assert(engine.readInput(input.data(), 3) == 2);
     assert(input[0] == 0.5f && input[1] == -0.5f);
@@ -31,4 +32,5 @@ int main() {
     assert(engine.droppedCaptureFrames() == 2);
     assert(engine.publishUSBBlock(block.data(), block.size() - 1) == 0);
     assert(engine.malformedBlocks() == 1);
+
 }

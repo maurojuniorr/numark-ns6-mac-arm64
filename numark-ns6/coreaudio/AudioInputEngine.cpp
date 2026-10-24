@@ -22,10 +22,15 @@ std::uint32_t AudioInputEngine::publishUSBBlock(const std::uint8_t* block,
     }
 
     const std::uint32_t frameCount = static_cast<std::uint32_t>(frames);
+    std::uint64_t nonZeroSamples = 0;
+    for (std::size_t i = 0; i < frames * AudioInputDecoder::kChannelCount; ++i)
+        nonZeroSamples += decoded_[i] != 0.0f;
+    decodedNonZeroSamples_.fetch_add(nonZeroSamples, std::memory_order_relaxed);
     const std::uint32_t written = ring_.write(decoded_.data(), frameCount);
     droppedCaptureFrames_.fetch_add(frameCount - written, std::memory_order_relaxed);
     return written;
 }
+
 
 std::uint32_t AudioInputEngine::readInput(float* interleaved,
                                           std::uint32_t frames) noexcept {

@@ -3,7 +3,8 @@
 std::size_t MIDIInputParser::feedReport(const std::uint8_t* report, std::size_t length,
                                        std::uint8_t* output) noexcept {
     if (report == nullptr || output == nullptr) return 0;
-    if (length != kReportBytes || report[kReportPayloadBytes] != 0) {
+    // Byte 41 is a terminator, not MIDI data; the controller does not keep it at zero.
+    if (length != kReportBytes) {
         used_ = 0;
         expected_ = 0;
         return 0;

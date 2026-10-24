@@ -171,18 +171,6 @@ void AudioFeedbackReader::didComplete(Slot& slot, IOReturn status) noexcept {
         if (sink_ != nullptr) sink_->publish(observation);
     }
     slot.inFlight = false;
-    const auto packetCount = packets_.load(std::memory_order_relaxed);
-    if (packetCount % 2000 == 0) {
-        os_log(OS_LOG_DEFAULT,
-               "NS6 feedback health: packets %{public}llu valid %{public}llu short %{public}llu length %{public}llu range %{public}llu transfer %{public}llu skipped %{public}llu",
-               static_cast<unsigned long long>(packetCount),
-               static_cast<unsigned long long>(valid_.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(shortPackets_.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(unexpectedLengths_.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(outOfRange_.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(transferErrors_.load(std::memory_order_relaxed)),
-               static_cast<unsigned long long>(skippedIntervals_.load(std::memory_order_relaxed)));
-    }
     if (status == kIOReturnNoDevice) {
         running_ = false;
         return;

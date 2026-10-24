@@ -16,7 +16,7 @@ struct AudioInputReaderStats final {
 class AudioInputReader final {
 public:
     static constexpr std::uint32_t kTransferBytes = 10240;
-    static constexpr std::uint32_t kSlotCount = 3;
+    static constexpr std::uint32_t kSlotCount = 4;
 
     AudioInputReader() = default;
     ~AudioInputReader();
