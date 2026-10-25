@@ -179,11 +179,36 @@ void AudioTransportRuntime::workerMain() noexcept {
     }
     publishStartResult(kIOReturnSuccess, runLoop);
     auto nextMIDIRecovery = std::chrono::steady_clock::now();
+    auto nextOutputRetry = nextMIDIRecovery;
     auto nextInputRetry = nextMIDIRecovery;
     auto nextInputReport = nextMIDIRecovery + std::chrono::seconds(5);
     while (!stopRequested_.load(std::memory_order_acquire)) {
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, true);
         const auto now = std::chrono::steady_clock::now();
+        if (output_->stopped() && now >= nextOutputRetry && session_.isCurrentDevice() &&
+            !stopRequested_.load(std::memory_order_acquire)) {
+            nextOutputRetry = now + std::chrono::seconds(1);
+            const IOReturn stopped = output_->stop();
+            if (stopped == kIOReturnSuccess) {
+                std::unique_ptr<AudioOutWorker> replacement(
+                        new (std::nothrow) AudioOutWorker(session_, outputRing_, packetPolicy_));
+                if (!replacement) {
+                    os_log_error(OS_LOG_DEFAULT, "NS6 OUT recovery allocation failed");
+                } else {
+                    outputRing_.advanceResampled(outputRing_.availableFrames(), 1.0);
+                    output_.swap(replacement);
+                    const IOReturn restarted = output_->start();
+                    if (restarted == kIOReturnSuccess)
+                        os_log(OS_LOG_DEFAULT, "NS6 OUT recovered after USB transfer failure");
+                    else
+                        os_log_error(OS_LOG_DEFAULT, "NS6 OUT recovery start failed: 0x%08x",
+                                     static_cast<unsigned>(restarted));
+                }
+            } else {
+                os_log_error(OS_LOG_DEFAULT, "NS6 OUT recovery drain failed: 0x%08x",
+                             static_cast<unsigned>(stopped));
+            }
+        }
         const bool wantInput = inputEnabled_.load(std::memory_order_acquire);
         if (wantInput && inputRunning && now >= nextInputReport) {
             const auto reader = input_->stats();

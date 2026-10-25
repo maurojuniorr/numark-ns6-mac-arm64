@@ -128,12 +128,37 @@ struct KeepaliveState {
     AudioDeviceID activeDevice = kUnknownDevice;
     OSStatus lastStartFailure = noErr;
     std::uint64_t activeUSBGeneration = 0;
+    unsigned missingFlowChecks = 0;
 };
+
+bool hasActiveAudioFlow(AudioDeviceID device) {
+    const AudioObjectPropertyAddress address{0x6e733666, // 'ns6f'
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+    CFStringRef frames = nullptr;
+    UInt32 size = sizeof(frames);
+    const OSStatus status = AudioObjectGetPropertyData(device, &address, 0, nullptr, &size, &frames);
+    const bool active = status == noErr && frames != nullptr && CFStringGetIntValue(frames) > 0;
+    if (frames != nullptr) CFRelease(frames);
+    return active;
+}
 
 void updateAudioKeepalive(KeepaliveState& state, CFStringRef uid, const char* direction) {
     const std::uint64_t usbGeneration = ns6USBGeneration();
     const AudioDeviceID discoveredDevice = findNS6Device(uid);
-    // CoreAudio may cache DeviceIsRunning as false after Start(NULL); the USB generation is authoritative here.
+    if (state.activeDevice != kUnknownDevice && state.activeDevice == discoveredDevice &&
+        usbGeneration != 0 && usbGeneration == state.activeUSBGeneration) {
+        if (hasActiveAudioFlow(state.activeDevice)) {
+            state.missingFlowChecks = 0;
+        } else if (++state.missingFlowChecks >= 2) {
+            os_log_error(OS_LOG_DEFAULT,
+                         "Numark NS6 MIDI Bridge %{public}s keepalive has no active audio flow; restarting",
+                         direction);
+            (void)AudioDeviceStop(state.activeDevice, nullptr);
+            state.activeDevice = kUnknownDevice;
+            state.activeUSBGeneration = 0;
+            state.missingFlowChecks = 0;
+        }
+    }
     const auto action = ns6::audioKeepaliveAction(
         state.activeDevice, discoveredDevice, usbGeneration == state.activeUSBGeneration);
     if (action == ns6::AudioKeepaliveAction::Stop) {
@@ -142,6 +167,7 @@ void updateAudioKeepalive(KeepaliveState& state, CFStringRef uid, const char* di
                direction, state.activeDevice, (int)status);
         state.activeDevice = kUnknownDevice;
         state.activeUSBGeneration = 0;
+        state.missingFlowChecks = 0;
     }
     if (action == ns6::AudioKeepaliveAction::Start) {
         const OSStatus status = AudioDeviceStart(discoveredDevice, nullptr);
@@ -151,6 +177,7 @@ void updateAudioKeepalive(KeepaliveState& state, CFStringRef uid, const char* di
                    direction, discoveredDevice);
             state.activeDevice = discoveredDevice;
             state.activeUSBGeneration = usbGeneration;
+            state.missingFlowChecks = 0;
         } else if (status != state.lastStartFailure) {
             state.lastStartFailure = status;
             os_log_error(OS_LOG_DEFAULT, "Numark NS6 MIDI Bridge could not start %{public}s keepalive (device %u, status %d)",

@@ -27,6 +27,7 @@ public:
     // including when stop returns a drain timeout.
     IOReturn stop() noexcept;
     AudioOutWorkerStats stats() const noexcept;
+    bool stopped() const noexcept { return !running_; }
 
 private:
     struct Slot final {
