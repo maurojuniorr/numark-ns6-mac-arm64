@@ -111,6 +111,7 @@ static void maintain_device_service(void) {
 }
 #endif
 
+static void blackout_controller(void);
 static void stop(int signal_number){(void)signal_number;running=0;}
 static uint64_t monotonic_ms(void){struct timespec now;clock_gettime(CLOCK_MONOTONIC,&now);return (uint64_t)now.tv_sec*1000+(uint64_t)now.tv_nsec/1000000;}
 #if !NS6_DEVICE_SERVICE_BUILD
@@ -131,6 +132,7 @@ static void log_outbound_activity(void){
 }
 static void receive_from_application(const MIDIPacketList *list,void *reference,void *connection){
     (void)reference;(void)connection;
+    if(list&&list->numPackets)observe_client_activity();
     unsigned char report[41];
     size_t used=0;
     const MIDIPacket *packet=list->packet;
@@ -215,6 +217,7 @@ int main(void){
     MIDIObjectSetIntegerProperty(destination,kMIDIPropertyUniqueID,0x4e533602);
     fprintf(stderr,"Numark NS6 MIDI Bridge ready\n");
     while(running){
+        maintain_audio_session();
         unsigned char data[64];ssize_t length=recv(socket_fd,data,sizeof(data),0);
         if(length<=0){
             uint64_t heartbeat=atomic_load(&last_heartbeat_ms);
@@ -231,6 +234,8 @@ int main(void){
         if(MIDIPacketListAdd(list,sizeof(storage),packet,0,(UInt16)length,data))MIDIReceived(source,list);
         log_outbound_activity();
     }
+    set_client_active(false);
+    release_audio_session();
     MIDIEndpointDispose(destination);MIDIEndpointDispose(source);MIDIClientDispose(client);close(socket_fd);
     return 0;
 #endif

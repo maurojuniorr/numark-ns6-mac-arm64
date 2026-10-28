@@ -8,8 +8,8 @@ static inline bool ns6_is_waveform_endpoint(UInt8 direction, UInt8 number, UInt8
     return direction == kUSBIn && number == 6 && type == kUSBBulk;
 }
 
-static inline bool ns6_should_run_waveform_drain(bool midi_session_active) {
-    return !midi_session_active;
+static inline bool ns6_should_run_waveform_drain(bool midi_session_active, bool capture_requested) {
+    return !midi_session_active || capture_requested;
 }
 
 #endif

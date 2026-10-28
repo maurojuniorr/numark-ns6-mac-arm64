@@ -119,7 +119,7 @@ clean:
 
 usb-test: NS6USBTest.c NS6Transport.c NS6USB.c NS6USBEndpoint.h NS6USBTiming.c NS6USBTiming.h NS6ClockControl.c NS6FeedbackTelemetry.h NS6MIDI.c NS6AudioRecovery.c NS6AudioRecovery.h NS6FirmwareVersion.c NS6FirmwareVersion.h
 	mkdir -p build
-	$(CC) $(CFLAGS) NS6USBTest.c NS6Transport.c NS6USB.c NS6USBTiming.c NS6ClockControl.c NS6MIDI.c NS6AudioRecovery.c NS6FirmwareVersion.c -o build/ns6-usb-test -framework CoreAudio -framework CoreFoundation -framework IOKit -lm
+	$(CC) $(CFLAGS) NS6USBTest.c NS6Transport.c NS6USB.c NS6USBTiming.c NS6ClockControl.c NS6MIDI.c NS6IOMetrics.c NS6AudioRecovery.c NS6FirmwareVersion.c -o build/ns6-usb-test -framework CoreAudio -framework CoreFoundation -framework IOKit -lm
 
 usb-work-interval-regression-test: $(BUILD)/MacOS/NumarkNS6 NS6USBWorkIntervalRegressionTest.sh
 	./NS6USBWorkIntervalRegressionTest.sh $(BUILD)/MacOS/NumarkNS6
@@ -288,9 +288,9 @@ test: capture-test pcm-level-test connection-policy-test
 
 
 midi-bridge: build/NumarkNS6MIDIBridge
-build/NumarkNS6MIDIBridge: NS6MIDIBridge.c
+build/NumarkNS6MIDIBridge: NS6MIDIBridge.c NS6MIDILease.h
 	mkdir -p build
-	$(CC) $(CFLAGS) -Wno-deprecated-declarations NS6MIDIBridge.c -o $@ -framework CoreMIDI -framework CoreFoundation
+	$(CC) $(CFLAGS) -Wno-deprecated-declarations NS6MIDIBridge.c -o $@ -framework CoreMIDI -framework CoreFoundation -framework CoreAudio
 
 audio-list: AudioList.c
 	$(CC) $(CFLAGS) AudioList.c -o build/audio-list -framework CoreAudio -framework CoreFoundation

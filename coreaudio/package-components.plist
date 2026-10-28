@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+    <dict>
+        <key>RootRelativeBundlePath</key>
+        <string>Library/Audio/Plug-Ins/HAL/NumarkNS6M1.driver</string>
+        <key>BundleIsVersionChecked</key>
+        <false/>
+        <key>BundleIsRelocatable</key>
+        <false/>
+        <key>BundleOverwriteAction</key>
+        <string>upgrade</string>
+    </dict>
+    <dict>
+        <key>RootRelativeBundlePath</key>
+        <string>Applications/Numark NS6 Status.app</string>
+        <key>BundleIsVersionChecked</key>
+        <false/>
+        <key>BundleIsRelocatable</key>
+        <false/>
+        <key>BundleHasStrictIdentifier</key>
+        <true/>
+        <key>BundleOverwriteAction</key>
+        <string>upgrade</string>
+    </dict>
+</array>
+</plist>

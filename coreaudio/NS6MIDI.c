@@ -20,14 +20,15 @@
 
 #define MIDI_PACKET_BYTES 42
 #define MIDI_IDLE_BYTE 0xfd
-#define MIDI_TERMINATOR 0x00
-#define MIDI_READ_SLOTS 4
+/* Ploytec retains 0xE0 in the OUT control byte; IN reports use a separate trailer. */
+#define MIDI_OUTPUT_CONTROL 0xe0
+#define MIDI_READ_SLOTS NS6_MIDI_RECOVERY_SLOTS
 #define MIDI_WRITE_QUEUE 1024
 #define MIDI_SOCKET_BUFFER (1024 * 1024)
 #define DRIVER_PORT 48238
 #define BRIDGE_PORT 48239
 
-struct read_slot { unsigned char data[MIDI_PACKET_BYTES]; };
+struct read_slot { unsigned char data[MIDI_PACKET_BYTES]; atomic_uint_fast64_t submitted_ms; };
 struct write_packet { unsigned char data[MIDI_PACKET_BYTES]; };
 static IOUSBInterfaceInterface **usb;
 static UInt8 input_pipe,output_pipe;
@@ -173,7 +174,7 @@ static bool find_pipes(void){
 static void enqueue(const unsigned char *data,unsigned length){
     if(!length||length>=MIDI_PACKET_BYTES)return;
     pthread_mutex_lock(&queue_lock);unsigned next=(tail+1)%MIDI_WRITE_QUEUE;
-    if(next!=head){memset(queue[tail].data,MIDI_IDLE_BYTE,MIDI_PACKET_BYTES);memcpy(queue[tail].data,data,length);queue[tail].data[MIDI_PACKET_BYTES-1]=MIDI_TERMINATOR;tail=next;pthread_cond_signal(&queue_ready);}pthread_mutex_unlock(&queue_lock);
+    if(next!=head){memset(queue[tail].data,MIDI_IDLE_BYTE,MIDI_PACKET_BYTES);memcpy(queue[tail].data,data,length);queue[tail].data[MIDI_PACKET_BYTES-1]=MIDI_OUTPUT_CONTROL;tail=next;pthread_cond_signal(&queue_ready);}pthread_mutex_unlock(&queue_lock);
 }
 static void forward_to_bridge(const unsigned char *data,unsigned length){if(outbound_socket>=0)sendto(outbound_socket,data,length,0,(const struct sockaddr *)&bridge_address,sizeof(bridge_address));}
 static void inspect_handshake_reply(const unsigned char *data,UInt32 length){
@@ -212,7 +213,6 @@ static void publish_packet(const unsigned char *data,UInt32 length){
     if(used)forward_to_bridge(messages,(unsigned)used);
     pthread_mutex_unlock(&parser_lock);
 }
-static bool submit_read(struct read_slot *slot);
 static void read_complete(void *reference,IOReturn status,void *argument){
     struct read_slot *slot=reference;
     uint32_t bit=read_slot_bit(slot);
@@ -237,7 +237,7 @@ static void read_complete(void *reference,IOReturn status,void *argument){
         schedule_read_recovery(slot,status);
         return;
     }
-    if(atomic_load(&running))submit_read(slot);
+    if(atomic_load(&running)&&atomic_load_explicit(&input_polling,memory_order_acquire))submit_read(slot);
 }
 static bool submit_read(struct read_slot *slot){
     ptrdiff_t index=slot?slot-reads:-1;
@@ -385,6 +385,19 @@ static void *write_worker(void *unused){
             }
             bool all_submitted=recovered;
             if(recovered){
+                if(clear_mask&recovery_mask){
+                    struct timespec deadline;
+                    clock_gettime(CLOCK_REALTIME,&deadline);
+                    deadline.tv_nsec+=250000000L;
+                    if(deadline.tv_nsec>=1000000000L){deadline.tv_sec++;deadline.tv_nsec-=1000000000L;}
+                    pthread_mutex_lock(&queue_lock);
+                    while(in_flight_read_mask&&atomic_load(&running)&&pthread_cond_timedwait(&queue_ready,&queue_lock,&deadline)==0){}
+                    recovery_mask|=ns6_midi_recovery_take(&pending_read_recovery_mask);
+                    recovery_mask=ns6_midi_recovery_ready(recovery_mask,in_flight_read_mask);
+                    /* This clear already covers the aborted reads that completed while waiting. */
+                    pending_read_clear_mask&=~recovery_mask;
+                    pthread_mutex_unlock(&queue_lock);
+                }
                 for(unsigned i=0;i<MIDI_READ_SLOTS;++i)
                     if((recovery_mask&(UINT32_C(1)<<i))&&!submit_read(&reads[i]))all_submitted=false;
             }else if(atomic_load(&running)){
@@ -434,7 +447,7 @@ bool ns6_midi_start(IOUSBInterfaceInterface **new_usb,CFRunLoopRef run_loop){
     atomic_store(&last_input_error_log_ms,0);
     for(unsigned i=0;i<MIDI_READ_SLOTS;++i)atomic_store(&read_slot_out_of_flight_since_ms[i],0);
     if(!find_pipes()||(ns6_usb_midi_input_enabled()&&(*usb)->ClearPipeStallBothEnds(usb,input_pipe)!=kIOReturnSuccess)||(*usb)->ClearPipeStallBothEnds(usb,output_pipe)!=kIOReturnSuccess||!open_sockets()){close_sockets();usb=NULL;return false;}
-    atomic_store(&running,true);
+    atomic_store(&client_active,false);atomic_store(&last_client_active_ms,0);atomic_store(&input_polling,ns6_usb_midi_input_enabled());atomic_store(&running,true);
     if(pthread_create(&writer,NULL,write_worker,NULL)!=0){atomic_store(&running,false);close_sockets();usb=NULL;return false;}
     writer_started=true;
     if(ns6_usb_midi_input_enabled()){
@@ -489,6 +502,7 @@ bool ns6_midi_handshake(CFRunLoopRef loop){
     pump_until(loop,started+796);
     enqueue(NS6_MIDI_WAKE,sizeof(NS6_MIDI_WAKE));
     pthread_mutex_lock(&handshake_lock);handshake_capture=false;handshake_sysex_active=false;pthread_mutex_unlock(&handshake_lock);
+    refresh_input_polling();
     os_log(OS_LOG_DEFAULT,"Numark NS6 host-identify handshake completed; device reply %{public}s",received?"observed":"not observed");
     return received;
 }
@@ -501,8 +515,8 @@ void ns6_midi_stop(void){
     bool was_running=atomic_exchange(&running,false);
     atomic_store_explicit(&read_target_count,0,memory_order_release);
     if(!was_running&&!writer_started&&!receiver_started){close_sockets();usb=NULL;return;}
+    refresh_input_polling();
     pthread_mutex_lock(&queue_lock);pthread_cond_broadcast(&queue_ready);pthread_mutex_unlock(&queue_lock);
-    if(usb&&input_pipe)(*usb)->AbortPipe(usb,input_pipe);
     if(inbound_socket>=0){close(inbound_socket);inbound_socket=-1;}
     if(writer_started){pthread_join(writer,NULL);writer_started=false;}
     if(receiver_started){pthread_join(receiver,NULL);receiver_started=false;}

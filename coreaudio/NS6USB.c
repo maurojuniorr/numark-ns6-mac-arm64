@@ -1,5 +1,7 @@
 #include "NS6USB.h"
 #include "NS6Transport.h"
+#include "NS6CaptureDecoder.h"
+#include "NS6CaptureRing.h"
 #include "NS6MIDI.h"
 #include "NS6ClockControl.h"
 #include "NS6USBTiming.h"
@@ -860,7 +862,7 @@ static void *worker(void *unused){
 #endif
         }else{
             fprintf(stderr,"Numark NS6 MIDI unavailable; continuing with audio only\n");
-            if(ns6_should_run_waveform_drain(midi_session_active)){
+            if(ns6_should_run_waveform_drain(midi_session_active,false)){
                 os_log(OS_LOG_DEFAULT,"Numark NS6 MIDI unavailable; enabling waveform endpoint drain for audio-only session");
                 start_waveform_drain();
             }
