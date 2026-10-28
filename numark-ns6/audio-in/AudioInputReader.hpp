@@ -5,18 +5,21 @@
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 
 struct AudioInputReaderStats final {
     std::uint64_t completedTransfers = 0;
     std::uint64_t transportErrors = 0;
     IOReturn lastError = kIOReturnSuccess;
+    std::uint64_t readsOver50ms = 0;
+    std::uint64_t maxReadMicros = 0;
 };
 
 class AudioInputReader final {
 public:
     static constexpr std::uint32_t kTransferBytes = 10240;
-    static constexpr std::uint32_t kSlotCount = 4;
+    static constexpr std::uint32_t kSlotCount = 8;
 
     AudioInputReader() = default;
     ~AudioInputReader();
@@ -37,6 +40,8 @@ private:
         IOReturn status = kIOReturnSuccess;
         std::uint32_t bytes = 0;
         std::uint64_t sequence = 0;
+        std::chrono::steady_clock::time_point submittedAt{};
+        std::uint64_t completedAgeMicros = 0;
     };
 
     static void completion(void* refcon, IOReturn status, void* argument);
@@ -57,4 +62,6 @@ private:
     std::atomic<std::uint64_t> completedTransfers_{0};
     std::atomic<std::uint64_t> transportErrors_{0};
     std::atomic<IOReturn> lastError_{kIOReturnSuccess};
+    std::atomic<std::uint64_t> readsOver50ms_{0};
+    std::atomic<std::uint64_t> maxReadMicros_{0};
 };

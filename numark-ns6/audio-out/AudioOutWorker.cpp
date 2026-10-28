@@ -28,7 +28,9 @@ AudioOutWorkerStats AudioOutWorker::stats() const noexcept {
     return {submitted_.load(std::memory_order_relaxed),
             completed_.load(std::memory_order_relaxed),
             failures_.load(std::memory_order_relaxed),
-            skippedIntervals_.load(std::memory_order_relaxed)};
+            skippedIntervals_.load(std::memory_order_relaxed),
+            nonSilentSubmitted_.load(std::memory_order_relaxed),
+            ringUnderrunFrames_.load(std::memory_order_relaxed)};
 }
 
 IOReturn AudioOutWorker::start() noexcept {

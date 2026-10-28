@@ -8,7 +8,7 @@ Audio OUT and feedback are independent modules; `AudioTransportRuntime` composes
 
 The input is exposed as the stereo master/record return, not separate mic/line channels. Hardware testing confirmed capture in OBS and TikTok LIVE Studio while Mixxx continued output and MIDI control. The NS6's Master/Record return is a hardware mix of software playback routed through the controller and analog sources sent to Master; it is not driver-side USB OUT copying.
 
-The current 0.2.45 milestone and the issues resolved during validation are recorded in [the 1.0.0 release-candidate notes](docs/releases/1.0.0-rc.1.md).
+The 1.0.0 release and the issues resolved during validation are recorded in [the release notes](docs/releases/1.0.0.md).
 
 MIDI IN uses endpoint `0x83`, four ordered asynchronous reads, and the observed 42-byte report parser. The HAL forwards complete channel-voice messages over loopback UDP to the per-user-session CoreMIDI bridge. Read errors trigger a pipe drain and restart on the runtime thread, outside the USB callback. MIDI OUT uses a separate worker on endpoint `0x04`; the bridge batches host messages into at most 41 payload bytes, and the worker wraps each datagram in the NS6's 42-byte report before writing it to USB. Both virtual CoreMIDI endpoints use the original “Numark NS6” identity so existing Mixxx mappings can bind. The audio OUT and IN devices remain separate. Input SysEx/system-common messages are not forwarded yet, and USB disconnection can still lose in-flight MIDI; the driver logs read, forwarding, and write failures.
 

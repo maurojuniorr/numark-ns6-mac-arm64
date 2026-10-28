@@ -2,6 +2,7 @@
 
 #include <new>
 #include <chrono>
+#include <cstdio>
 #include <system_error>
 #include <pthread.h>
 #include <sys/qos.h>
@@ -179,11 +180,26 @@ void AudioTransportRuntime::workerMain() noexcept {
     }
     publishStartResult(kIOReturnSuccess, runLoop);
     auto nextMIDIRecovery = std::chrono::steady_clock::now();
+    auto nextMIDIReport = nextMIDIRecovery + std::chrono::seconds(5);
     auto nextOutputRetry = nextMIDIRecovery;
+    auto nextOutputReport = nextMIDIRecovery + std::chrono::seconds(5);
     auto nextInputRetry = nextMIDIRecovery;
     auto nextInputReport = nextMIDIRecovery + std::chrono::seconds(5);
     while (!stopRequested_.load(std::memory_order_acquire)) {
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, true);
+        const std::uint8_t* anomaly = nullptr;
+        std::size_t anomalyBytes = 0;
+        std::array<float, 2> previous{};
+        if (inputEngine_.takeAnomalousBlock(anomaly, anomalyBytes, previous)) {
+            if (FILE* file = std::fopen("/private/tmp/ns6-input-anomaly-0259.bin", "wb")) {
+                std::fwrite(previous.data(), sizeof(float), previous.size(), file);
+                std::fwrite(anomaly, 1, anomalyBytes, file);
+                std::fclose(file);
+                os_log(OS_LOG_DEFAULT, "NS6 saved anomalous input USB block: %{public}zu bytes", anomalyBytes);
+            } else {
+                os_log_error(OS_LOG_DEFAULT, "NS6 could not save anomalous input USB block");
+            }
+        }
         const auto now = std::chrono::steady_clock::now();
         if (output_->stopped() && now >= nextOutputRetry && session_.isCurrentDevice() &&
             !stopRequested_.load(std::memory_order_acquire)) {
@@ -209,14 +225,24 @@ void AudioTransportRuntime::workerMain() noexcept {
                              static_cast<unsigned>(stopped));
             }
         }
+        if (now >= nextOutputReport) {
+            const auto out = output_->stats();
+            os_log_info(OS_LOG_DEFAULT,
+                        "NS6 output health: submitted=%{public}llu completed=%{public}llu failed=%{public}llu non-silent=%{public}llu missing=%{public}llu queue=%{public}u",
+                        out.submitted, out.completed, out.failures, out.nonSilentSubmitted,
+                        out.missingFrames, outputRing_.availableFrames());
+            nextOutputReport = now + std::chrono::seconds(5);
+        }
         const bool wantInput = inputEnabled_.load(std::memory_order_acquire);
         if (wantInput && inputRunning && now >= nextInputReport) {
             const auto reader = input_->stats();
             os_log_info(OS_LOG_DEFAULT,
-                        "NS6 input health: usb=%{public}llu errors=%{public}llu last=0x%{public}x decoded-nonzero=%{public}llu malformed=%{public}llu queued=%{public}u dropped=%{public}llu starved=%{public}llu",
+                        "NS6 input health: usb=%{public}llu errors=%{public}llu last=0x%{public}x slow-reads=%{public}llu max-read-us=%{public}llu decoded-nonzero=%{public}llu malformed=%{public}llu unexpected-bytes=%{public}llu sample-jumps=%{public}llu queued=%{public}u dropped=%{public}llu starved=%{public}llu",
                         reader.completedTransfers, reader.transportErrors,
-                        static_cast<unsigned>(reader.lastError), inputEngine_.decodedNonZeroSamples(),
-                        inputEngine_.malformedBlocks(), inputEngine_.ring().availableFrames(),
+                        static_cast<unsigned>(reader.lastError), reader.readsOver50ms,
+                        reader.maxReadMicros, inputEngine_.decodedNonZeroSamples(),
+                        inputEngine_.malformedBlocks(), inputEngine_.unexpectedUSBBytes(),
+                        inputEngine_.largeSampleJumps(), inputEngine_.ring().availableFrames(),
                         inputEngine_.droppedCaptureFrames(), inputEngine_.starvationFrames());
             nextInputReport = now + std::chrono::seconds(5);
         }
@@ -244,6 +270,15 @@ void AudioTransportRuntime::workerMain() noexcept {
                                      static_cast<unsigned>(restarted));
                 }
             }
+        }
+        if (midiEnabled_ && midiInput_ && now >= nextMIDIReport) {
+            const auto midi = midiInput_->stats();
+            os_log_info(OS_LOG_DEFAULT,
+                        "NS6 MIDI input health: reports=%{public}llu published=%{public}llu errors=%{public}llu last=0x%{public}x stopped=%{public}d recovery=%{public}d",
+                        midi.reports, midi.publishedBatches, midi.transferErrors,
+                        static_cast<unsigned>(midi.lastError), midiInput_->stopped(),
+                        midiInput_->needsRecovery());
+            nextMIDIReport = now + std::chrono::seconds(5);
         }
     }
 

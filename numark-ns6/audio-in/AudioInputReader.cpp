@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <exception>
 #include <cstdint>
+#include <os/log.h>
 
 namespace {
 constexpr UInt32 kDrainTimeoutMilliseconds = 5000;
@@ -18,7 +19,9 @@ AudioInputReader::~AudioInputReader() {
 AudioInputReaderStats AudioInputReader::stats() const noexcept {
     return {completedTransfers_.load(std::memory_order_relaxed),
             transportErrors_.load(std::memory_order_relaxed),
-            lastError_.load(std::memory_order_relaxed)};
+            lastError_.load(std::memory_order_relaxed),
+            readsOver50ms_.load(std::memory_order_relaxed),
+            maxReadMicros_.load(std::memory_order_relaxed)};
 }
 
 IOReturn AudioInputReader::start(NS6DeviceSession& session,
@@ -123,6 +126,14 @@ void AudioInputReader::completion(void* refcon, IOReturn status, void* argument)
 }
 
 void AudioInputReader::didComplete(Slot& slot, IOReturn status, void* argument) noexcept {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - slot.submittedAt).count();
+    const auto micros = static_cast<std::uint64_t>(elapsed);
+    slot.completedAgeMicros = micros;
+    if (micros > 50000) readsOver50ms_.fetch_add(1, std::memory_order_relaxed);
+    auto maximum = maxReadMicros_.load(std::memory_order_relaxed);
+    while (micros > maximum && !maxReadMicros_.compare_exchange_weak(
+            maximum, micros, std::memory_order_relaxed)) {}
     slot.inFlight = false;
     slot.completed = true;
     slot.status = status;
@@ -144,8 +155,14 @@ void AudioInputReader::drainCompletions() noexcept {
         const IOReturn completedStatus = next->status;
         if (completedStatus == kIOReturnSuccess) {
             completedTransfers_.fetch_add(1, std::memory_order_relaxed);
-            if (engine_ != nullptr)
+            if (engine_ != nullptr) {
+                const auto jumps = engine_->largeSampleJumps();
                 engine_->publishUSBBlock(static_cast<const std::uint8_t*>(next->data), next->bytes);
+                if (engine_->largeSampleJumps() > jumps)
+                    os_log(OS_LOG_DEFAULT,
+                           "NS6 input anomaly: sequence=%{public}llu read-us=%{public}llu bytes=%{public}u",
+                           next->sequence, next->completedAgeMicros, next->bytes);
+            }
         } else {
             transportErrors_.fetch_add(1, std::memory_order_relaxed);
             lastError_.store(completedStatus, std::memory_order_relaxed);
@@ -176,6 +193,7 @@ IOReturn AudioInputReader::submit(Slot& slot) noexcept {
     if (interface == nullptr) return kIOReturnNoDevice;
 
     slot.sequence = nextSubmitSequence_;
+    slot.submittedAt = std::chrono::steady_clock::now();
     slot.inFlight = true;
     const IOReturn result = (*interface)->ReadPipeAsync(
             interface, session_->audioInPipe(), slot.data, kTransferBytes, completion, &slot);
