@@ -26,5 +26,6 @@ void ns6_usb_timing_record_duration(NS6USBTiming *timing, uint64_t duration_ns);
 bool ns6_usb_timing_take_snapshot(NS6USBTiming *timing,
                                  NS6USBTimingSnapshot *snapshot);
 bool ns6_usb_timing_is_callback_gap(uint64_t interval_ns);
+bool ns6_usb_timing_is_slow_submit(uint64_t duration_ns);
 
 #endif

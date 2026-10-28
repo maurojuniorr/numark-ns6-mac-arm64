@@ -72,7 +72,18 @@ constexpr AudioDeviceID kUnknownDevice = kAudioObjectUnknown;
 constexpr SInt32 kNS6Vendor = 5604;
 constexpr SInt32 kNS6Product = 121;
 const CFStringRef kNS6OutputUID = CFSTR("io.github.maurojuniorr.numark-ns6.out");
-const CFStringRef kNS6InputUID = CFSTR("io.github.maurojuniorr.numark-ns6.in");
+
+OSStatus silentOutput(AudioDeviceID, const AudioTimeStamp*, const AudioBufferList*,
+                      const AudioTimeStamp*, AudioBufferList* output,
+                      const AudioTimeStamp*, void*) {
+    if (output != nullptr) {
+        for (UInt32 i = 0; i < output->mNumberBuffers; ++i) {
+            if (output->mBuffers[i].mData != nullptr)
+                std::memset(output->mBuffers[i].mData, 0, output->mBuffers[i].mDataByteSize);
+        }
+    }
+    return noErr;
+}
 
 std::uint64_t ns6USBGeneration() {
     CFMutableDictionaryRef matching = IOServiceMatching("IOUSBHostDevice");
@@ -126,6 +137,7 @@ AudioDeviceID findNS6Device(CFStringRef targetUID) {
 
 struct KeepaliveState {
     AudioDeviceID activeDevice = kUnknownDevice;
+    AudioDeviceIOProcID activeIOProc = nullptr;
     OSStatus lastStartFailure = noErr;
     std::uint64_t activeUSBGeneration = 0;
 };
@@ -133,28 +145,35 @@ struct KeepaliveState {
 void updateAudioKeepalive(KeepaliveState& state, CFStringRef uid, const char* direction) {
     const std::uint64_t usbGeneration = ns6USBGeneration();
     const AudioDeviceID discoveredDevice = findNS6Device(uid);
-    // CoreAudio may cache DeviceIsRunning as false after Start(NULL); the USB generation is authoritative here.
     const auto action = ns6::audioKeepaliveAction(
         state.activeDevice, discoveredDevice, usbGeneration == state.activeUSBGeneration);
     if (action == ns6::AudioKeepaliveAction::Stop) {
-        const OSStatus status = AudioDeviceStop(state.activeDevice, nullptr);
+        const OSStatus status = AudioDeviceStop(state.activeDevice, state.activeIOProc);
+        (void)AudioDeviceDestroyIOProcID(state.activeDevice, state.activeIOProc);
         os_log(OS_LOG_DEFAULT, "Numark NS6 MIDI Bridge stopped %{public}s keepalive (device %u, status %d)",
                direction, state.activeDevice, (int)status);
         state.activeDevice = kUnknownDevice;
+        state.activeIOProc = nullptr;
         state.activeUSBGeneration = 0;
     }
     if (action == ns6::AudioKeepaliveAction::Start) {
-        const OSStatus status = AudioDeviceStart(discoveredDevice, nullptr);
+        AudioDeviceIOProcID ioProc = nullptr;
+        OSStatus status = AudioDeviceCreateIOProcID(discoveredDevice, silentOutput, nullptr, &ioProc);
+        if (status == noErr) status = AudioDeviceStart(discoveredDevice, ioProc);
         if (status == noErr) {
             state.lastStartFailure = noErr;
             os_log(OS_LOG_DEFAULT, "Numark NS6 MIDI Bridge started %{public}s keepalive (device %u)",
                    direction, discoveredDevice);
             state.activeDevice = discoveredDevice;
+            state.activeIOProc = ioProc;
             state.activeUSBGeneration = usbGeneration;
-        } else if (status != state.lastStartFailure) {
-            state.lastStartFailure = status;
-            os_log_error(OS_LOG_DEFAULT, "Numark NS6 MIDI Bridge could not start %{public}s keepalive (device %u, status %d)",
-                         direction, discoveredDevice, (int)status);
+        } else {
+            if (ioProc != nullptr) (void)AudioDeviceDestroyIOProcID(discoveredDevice, ioProc);
+            if (status != state.lastStartFailure) {
+                state.lastStartFailure = status;
+                os_log_error(OS_LOG_DEFAULT, "Numark NS6 MIDI Bridge could not start %{public}s keepalive (device %u, status %d)",
+                             direction, discoveredDevice, (int)status);
+            }
         }
     }
 }
@@ -217,17 +236,15 @@ int main() {
     // CoreAudio discovery/start may block; keep it off the MIDI delivery loop.
     std::thread keepalive([&] {
         KeepaliveState output;
-        KeepaliveState input;
         while (keepaliveRunning.load(std::memory_order_acquire)) {
             updateAudioKeepalive(output, kNS6OutputUID, "output");
-            // AUHAL capture clients can receive callbacks without starting the input device's IO engine.
-            updateAudioKeepalive(input, kNS6InputUID, "input");
-            std::this_thread::sleep_for(output.activeDevice == kUnknownDevice ||
-                                        input.activeDevice == kUnknownDevice
+            std::this_thread::sleep_for(output.activeDevice == kUnknownDevice
                 ? std::chrono::milliseconds(250) : std::chrono::milliseconds(1000));
         }
-        if (input.activeDevice != kUnknownDevice) (void)AudioDeviceStop(input.activeDevice, nullptr);
-        if (output.activeDevice != kUnknownDevice) (void)AudioDeviceStop(output.activeDevice, nullptr);
+        if (output.activeDevice != kUnknownDevice) {
+            (void)AudioDeviceStop(output.activeDevice, output.activeIOProc);
+            (void)AudioDeviceDestroyIOProcID(output.activeDevice, output.activeIOProc);
+        }
     });
     for (;;) {
         pollfd descriptor{socketFD, POLLIN, 0};

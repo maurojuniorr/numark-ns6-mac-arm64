@@ -1,7 +1,9 @@
 #include "NS6Transport.h"
 #include <assert.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static AudioStreamBasicDescription float_format(void) {
@@ -123,6 +125,191 @@ static void test_fifo_compatibility_uses_monotonic_timestamps(void) {
     for (unsigned frame = 0; frame < 2; ++frame) expect_frame(output + (frame + 2) * 12, second + frame * 4);
 }
 
+static void test_multiple_clients_share_arrival_order_fifo(void) {
+    AudioStreamBasicDescription format = float_format();
+    float first_client[8], second_client[8];
+    unsigned char output[48] = {0};
+    fill(first_client, 2, 0.1f);
+    fill(second_client, 2, 0.7f);
+    ns6_transport_reset();
+    assert(ns6_transport_enqueue(first_client, 2, &format));
+    assert(ns6_transport_enqueue(second_client, 2, &format));
+    assert(ns6_transport_available() == 4);
+    assert(ns6_transport_dequeue(output, 4) == 4);
+    for (unsigned frame = 0; frame < 2; ++frame)
+        expect_frame(output + frame * 12, first_client + frame * 4);
+    for (unsigned frame = 0; frame < 2; ++frame)
+        expect_frame(output + (frame + 2) * 12, second_client + frame * 4);
+}
+
+static void test_multiple_clients_are_mixed_at_their_common_sample_time(void) {
+    AudioStreamBasicDescription format = float_format();
+    float first[8], second[8];
+    unsigned char output[24] = {0};
+    NS6TransportShared shared;
+    NS6TransportReader reader = {0};
+    ns6_transport_init_shared(&shared);
+    fill(first, 2, 0.2f);
+    fill(second, 2, 0.3f);
+    assert(ns6_transport_mix_at_shared(&shared, first, 1000, 2, &format));
+    assert(ns6_transport_mix_at_shared(&shared, second, 1000, 2, &format));
+    assert(ns6_transport_available_shared(&shared) == 2);
+    assert(ns6_transport_dequeue_shared(&shared, &reader, output, 2) == 2);
+    for (unsigned frame = 0; frame < 2; ++frame) {
+        float expected_frame[4];
+        for (unsigned channel = 0; channel < 4; ++channel) {
+            expected_frame[channel] = first[frame * 4 + channel] + second[frame * 4 + channel];
+        }
+        expect_frame(output + frame * 12, expected_frame);
+    }
+}
+
+static void test_dequeue_reports_a_timestamp_hole_separately_from_empty_queue(void) {
+    AudioStreamBasicDescription format = float_format();
+    NS6TransportShared shared;
+    NS6TransportReader reader = {0};
+    float first[8], second[8];
+    unsigned char output[48] = {0};
+    NS6TransportStopReason reason = NS6_TRANSPORT_STOP_NONE;
+    ns6_transport_init_shared(&shared);
+    fill(first, 2, 0.2f);
+    fill(second, 2, 0.3f);
+    assert(ns6_transport_mix_at_shared(&shared, first, 1000, 2, &format));
+    assert(ns6_transport_mix_at_shared(&shared, second, 1004, 2, &format));
+    assert(ns6_transport_dequeue_resampled_shared_diagnostic(
+               &shared, &reader, output, 4, 1.0, &reason) == 2);
+    assert(reason == NS6_TRANSPORT_STOP_MISSING_TAG);
+}
+
+static void test_dequeue_reports_queue_end_separately_from_missing_tag(void) {
+    AudioStreamBasicDescription format = float_format();
+    NS6TransportShared shared;
+    NS6TransportReader reader = {0};
+    float input[8];
+    unsigned char output[48] = {0};
+    NS6TransportStopReason reason = NS6_TRANSPORT_STOP_NONE;
+    ns6_transport_init_shared(&shared);
+    fill(input, 2, 0.2f);
+    assert(ns6_transport_enqueue_shared(&shared, input, 2, &format));
+    assert(ns6_transport_dequeue_resampled_shared_diagnostic(
+               &shared, &reader, output, 4, 1.0, &reason) == 2);
+    assert(reason == NS6_TRANSPORT_STOP_EMPTY);
+}
+
+static void test_next_stream_continues_shared_sample_timeline(void) {
+    AudioStreamBasicDescription format = float_format();
+    NS6TransportShared shared;
+    NS6TransportReader reader = {0};
+    float first[16], second[16];
+    unsigned char output[48] = {0};
+    ns6_transport_init_shared(&shared);
+    fill(first, 4, 0.1f);
+    fill(second, 4, 0.5f);
+
+    assert(ns6_transport_mix_at_shared(&shared, first, 0, 4, &format));
+    assert(ns6_transport_dequeue_shared(&shared, &reader, output, 4) == 4);
+    assert(ns6_transport_available_shared(&shared) == 0);
+
+    /* A stopped CoreAudio client must resume on the existing USB read cursor. */
+    assert(ns6_transport_mix_at_shared(&shared, second, 4, 4, &format));
+    assert(ns6_transport_available_shared(&shared) == 4);
+    assert(ns6_transport_dequeue_shared(&shared, &reader, output, 4) == 4);
+    for (unsigned frame = 0; frame < 4; ++frame)
+        expect_frame(output + frame * 12, second + frame * 4);
+}
+
+static void test_empty_readable_queue_rebases_after_a_stale_timeline_gap(void) {
+    AudioStreamBasicDescription format = float_format();
+    NS6TransportShared shared;
+    NS6TransportReader reader = {0};
+    float first[8], after_gap[8], resumed[8];
+    unsigned char output[24] = {0};
+    ns6_transport_init_shared(&shared);
+    fill(first, 2, 0.1f);
+    fill(after_gap, 2, 0.3f);
+    fill(resumed, 2, 0.7f);
+
+    assert(ns6_transport_mix_at_shared(&shared, first, 1000, 2, &format));
+    assert(ns6_transport_mix_at_shared(&shared, after_gap, 1004, 2, &format));
+    assert(ns6_transport_dequeue_shared(&shared, &reader, output, 2) == 2);
+    assert(ns6_transport_available_shared(&shared) == 0);
+
+    assert(ns6_transport_mix_at_shared(&shared, resumed, 20000, 2, &format));
+    assert(ns6_transport_available_shared(&shared) == 2);
+    assert(ns6_transport_dequeue_shared(&shared, &reader, output, 2) == 2);
+    expect_frame(output, resumed);
+}
+
+static void test_empty_shared_ring_recovers_from_coreaudio_timeline_jump(void) {
+    AudioStreamBasicDescription format = float_format();
+    NS6TransportShared shared;
+    NS6TransportReader reader = {0};
+    float first[16], next[16];
+    unsigned char output[48] = {0};
+    ns6_transport_init_shared(&shared);
+    fill(first, 4, 0.1f);
+    fill(next, 4, 0.5f);
+
+    assert(ns6_transport_mix_at_shared(&shared, first, 1000, 4, &format));
+    assert(ns6_transport_dequeue_shared(&shared, &reader, output, 4) == 4);
+    ns6_transport_advance_shared(&shared, 20000);
+    assert(ns6_transport_available_shared(&shared) == 0);
+
+    assert(ns6_transport_mix_at_shared(&shared, next, 15000000, 4, &format));
+    assert(ns6_transport_available_shared(&shared) == 4);
+    assert(ns6_transport_dequeue_shared(&shared, &reader, output, 4) == 4);
+    for (unsigned frame = 0; frame < 4; ++frame)
+        expect_frame(output + frame * 12, next + frame * 4);
+}
+
+typedef struct {
+    NS6TransportShared *shared;
+    float *frames;
+    UInt64 sample_time;
+    UInt32 count;
+    bool accepted;
+} ConcurrentMix;
+
+static void *enqueue_concurrent_mix(void *opaque) {
+    ConcurrentMix *mix = opaque;
+    AudioStreamBasicDescription format = float_format();
+    mix->accepted = ns6_transport_mix_at_shared(mix->shared, mix->frames,
+                                                 mix->sample_time, mix->count, &format);
+    return NULL;
+}
+
+static void test_concurrent_clients_add_without_losing_samples(void) {
+    enum { FRAMES = 2048 };
+    NS6TransportShared shared;
+    NS6TransportReader reader = {0};
+    float *first = malloc((size_t)FRAMES * 4 * sizeof(float));
+    float *second = malloc((size_t)FRAMES * 4 * sizeof(float));
+    unsigned char *output = malloc((size_t)FRAMES * 12);
+    assert(first && second && output);
+    for (unsigned frame = 0; frame < FRAMES; ++frame) {
+        for (unsigned channel = 0; channel < 4; ++channel) {
+            first[frame * 4 + channel] = 0.2f;
+            second[frame * 4 + channel] = 0.3f;
+        }
+    }
+    ns6_transport_init_shared(&shared);
+    ConcurrentMix a = {&shared, first, 50000, FRAMES, false};
+    ConcurrentMix b = {&shared, second, 50000, FRAMES, false};
+    pthread_t first_thread, second_thread;
+    assert(pthread_create(&first_thread, NULL, enqueue_concurrent_mix, &a) == 0);
+    assert(pthread_create(&second_thread, NULL, enqueue_concurrent_mix, &b) == 0);
+    assert(pthread_join(first_thread, NULL) == 0);
+    assert(pthread_join(second_thread, NULL) == 0);
+    assert(a.accepted && b.accepted);
+    assert(ns6_transport_available_shared(&shared) == FRAMES);
+    assert(ns6_transport_dequeue_shared(&shared, &reader, output, FRAMES) == FRAMES);
+    const float expected[4] = {0.5f, 0.5f, 0.5f, 0.5f};
+    for (unsigned frame = 0; frame < FRAMES; ++frame)
+        expect_frame(output + frame * 12, expected);
+    free(output);
+    free(second);
+    free(first);
+}
 
 static float decode_sample(const unsigned char *sample) {
     int32_t value = (int32_t)sample[0] | ((int32_t)sample[1] << 8) |
@@ -181,6 +368,14 @@ int main(void) {
     test_late_timestamp_audio_appends_after_consumed_audio();
     test_coreaudio_timestamp_jump_does_not_create_usb_fifo_hole();
     test_fifo_compatibility_uses_monotonic_timestamps();
+    test_multiple_clients_share_arrival_order_fifo();
+    test_multiple_clients_are_mixed_at_their_common_sample_time();
+    test_dequeue_reports_a_timestamp_hole_separately_from_empty_queue();
+    test_dequeue_reports_queue_end_separately_from_missing_tag();
+    test_next_stream_continues_shared_sample_timeline();
+    test_empty_readable_queue_rebases_after_a_stale_timeline_gap();
+    test_empty_shared_ring_recovers_from_coreaudio_timeline_jump();
+    test_concurrent_clients_add_without_losing_samples();
     test_fractional_dequeue_interpolates_and_carries_phase();
     test_small_clock_offset_is_absorbed_fractionally();
     test_new_audio_recovers_after_read_cursor_passed_empty_queue();

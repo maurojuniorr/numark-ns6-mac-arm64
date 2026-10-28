@@ -14,6 +14,16 @@ int main(void) {
     assert(value.host_time >= 1000000u);
     assert(value.host_time <= 1000000u + 2000000000u);
 
+    uint64_t anchor = ns6_zero_timestamp_keep_anchor(0, 1000000u);
+    assert(anchor == 1000000u);
+    NS6ZeroTimestamp before_restart = ns6_zero_timestamp_calculate(
+        anchor, anchor + 1000000000u, 1u, 1u, 44100.0);
+    anchor = ns6_zero_timestamp_keep_anchor(anchor, anchor + 1000000000u);
+    NS6ZeroTimestamp after_restart = ns6_zero_timestamp_calculate(
+        anchor, anchor + 2000000000u, 1u, 1u, 44100.0);
+    assert(anchor == 1000000u);
+    assert(after_restart.sample_time > before_restart.sample_time);
+
     puts("NS6 zero timestamp tests passed");
     return 0;
 }

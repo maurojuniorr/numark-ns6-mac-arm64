@@ -101,16 +101,31 @@ AudioServerPlugInDriverInterface gInterface;
 AudioServerPlugInDriverInterface* gInterfacePointer = &gInterface;
 AudioServerPlugInDriverRef gDriver = &gInterfacePointer;
 IOReturn stopHardware();
-IOReturn startHardware();
+IOReturn startHardware(bool resetTimestampAnchor);
 bool anyActive() noexcept;
 
 void monitorUSB() {
     unsigned ticks = 0;
+    std::uint64_t previousMixCalls = 0;
+    std::uint64_t previousMixFrames = 0;
+    mach_timebase_info_data_t timebase{};
+    mach_timebase_info(&timebase);
     while (!gState.monitorStop.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         std::lock_guard<std::mutex> lock(gState.mutex);
         if (!anyActive()) continue;
         if (++ticks % 10 == 0) {
+            const auto calls = gState.output.mixCalls();
+            const auto frames = gState.output.mixFrames();
+            const auto gapTicks = gState.output.takeMaxMixGapTicks();
+            const auto gapUs = timebase.denom == 0 ? 0 :
+                    gapTicks * timebase.numer / timebase.denom / 1000;
+            os_log_info(OS_LOG_DEFAULT,
+                "NS6 WriteMix health: calls=%{public}llu frames=%{public}llu max-gap-us=%{public}llu queue=%{public}u dropped=%{public}llu",
+                calls - previousMixCalls, frames - previousMixFrames, gapUs,
+                gState.output.ring().availableFrames(), gState.output.droppedMixFrames());
+            previousMixCalls = calls;
+            previousMixFrames = frames;
             for (UInt32 i = 0; i < gState.clientCount; ++i) {
                 const auto& client = gState.clients[i];
                 if (client.device != NS6AudioDriver::kInputDeviceObjectID) continue;
@@ -127,7 +142,7 @@ void monitorUSB() {
             (void)stopHardware();
         }
         if (!gState.session && NS6DeviceSession::devicePresent()) {
-            const IOReturn result = startHardware();
+            const IOReturn result = startHardware(false);
             if (result != kIOReturnSuccess)
                 os_log_error(OS_LOG_DEFAULT, "NS6 USB recovery failed: 0x%08x",
                              static_cast<unsigned>(result));
@@ -683,7 +698,7 @@ OSStatus STDMETHODCALLTYPE setProperty(AudioServerPlugInDriverRef, AudioObjectID
     return kAudioHardwareUnsupportedOperationError;
 }
 
-IOReturn startHardware() {
+IOReturn startHardware(bool resetTimestampAnchor) {
     try {
         gState.session = std::make_unique<NS6DeviceSession>();
         IOReturn result = gState.session->open();
@@ -730,7 +745,8 @@ IOReturn startHardware() {
         if (gState.session->firmwareVersion()[0] != 0)
             std::snprintf(gState.firmwareVersion, sizeof(gState.firmwareVersion), "%s",
                           gState.session->firmwareVersion());
-        gState.timestampAnchor.store(mach_absolute_time(), std::memory_order_release);
+        if (resetTimestampAnchor)
+            gState.timestampAnchor.store(mach_absolute_time(), std::memory_order_release);
         gState.timestampSeed.fetch_add(1, std::memory_order_release);
         gState.running.store(true);
         return kIOReturnSuccess;
@@ -761,7 +777,7 @@ OSStatus STDMETHODCALLTYPE startIO(AudioServerPlugInDriverRef, AudioObjectID dev
     const auto transition = lifecycle(device).startIO(client);
     if (transition == AudioIOTransition::Rejected) return kAudioHardwareBadObjectError;
     if (wasIdle) {
-        const IOReturn result = startHardware();
+        const IOReturn result = startHardware(true);
         if (result != kIOReturnSuccess) {
             os_log_error(OS_LOG_DEFAULT, "NS6 StartIO failed device=%{public}u client=%{public}u status=%{public}d", device, client, result);
             lifecycle(device).stopIO(client);

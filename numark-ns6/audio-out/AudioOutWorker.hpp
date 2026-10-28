@@ -12,6 +12,8 @@ struct AudioOutWorkerStats final {
     std::uint64_t completed = 0;
     std::uint64_t failures = 0;
     std::uint64_t skippedIntervals = 0;
+    std::uint64_t nonSilentSubmitted = 0;
+    std::uint64_t missingFrames = 0;
 };
 
 class AudioOutWorker final {
@@ -27,6 +29,7 @@ public:
     // including when stop returns a drain timeout.
     IOReturn stop() noexcept;
     AudioOutWorkerStats stats() const noexcept;
+    bool stopped() const noexcept { return !running_; }
 
 private:
     struct Slot final {

@@ -212,3 +212,4 @@ add_test(NAME audio_driver_contract_tests COMMAND audio_driver_contract_tests)
 add_test(NAME uninstall_driver_tests COMMAND /bin/sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/uninstall_driver_tests.sh")
 add_test(NAME audio_driver_bundle_signature
     COMMAND /usr/bin/codesign --verify --deep --strict "${NS6_PLUGIN_BUNDLE}")
+

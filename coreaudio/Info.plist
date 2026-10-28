@@ -7,6 +7,7 @@
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>Numark NS6</string>
   <key>CFBundlePackageType</key><string>BNDL</string>
+  <key>AudioServerPlugIn_MachServices</key><array><string>io.github.maurojuniorr.numark-ns6-device-service</string></array>
   <key>CFBundleShortVersionString</key><string>0.2.104</string>
   <key>CFBundleVersion</key><string>104</string>
   <key>CFPlugInFactories</key><dict>

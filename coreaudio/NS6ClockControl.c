@@ -9,6 +9,11 @@
 #define NS6_ADAPTIVE_CLOCK_MIN_OUTPUT_RATE_MILLIHZ UINT64_C(44000000)
 #endif
 #define NS6_MAX_OUTPUT_RATE_MILLIHZ UINT64_C(44100300)
+bool ns6_clock_control_feedback_value_is_valid(uint8_t frames_per_ms) {
+    return frames_per_ms >= NS6_FEEDBACK_MIN_FRAMES_PER_MS &&
+           frames_per_ms <= NS6_FEEDBACK_MAX_FRAMES_PER_MS;
+}
+
 void ns6_clock_control_init(NS6ClockControl *control) {
     if (!control) return;
     memset(control, 0, sizeof(*control));
@@ -34,8 +39,7 @@ void ns6_clock_control_reset_feedback(NS6ClockControl *control) {
 }
 
 void ns6_clock_control_observe(NS6ClockControl *control, uint8_t frames_per_ms) {
-    if (!control || frames_per_ms < NS6_FEEDBACK_MIN_FRAMES_PER_MS ||
-        frames_per_ms > NS6_FEEDBACK_MAX_FRAMES_PER_MS) return;
+    if (!control || !ns6_clock_control_feedback_value_is_valid(frames_per_ms)) return;
 
     control->target_frames_per_ms = frames_per_ms;
     control->requested_total += frames_per_ms;
@@ -192,7 +196,7 @@ double ns6_clock_control_source_frames_per_output_frame(const NS6ClockControl *c
     /* Keep the SPSC queue away from both starvation and overflow. The USB
        feedback establishes the base clock ratio; queue error applies a slow,
        bounded trim to absorb residual host/device drift and startup backlog. */
-    const double target_frames = 4096.0;
+    const double target_frames = (double)NS6_CLOCK_QUEUE_TARGET_FRAMES;
     double trim = ((double)queued_frames - target_frames) * 0.000001;
     /* Allow bounded SRC correction to absorb the measured producer/device
        mismatch before the 16K-frame ring fills and CoreAudio blocks are lost. */

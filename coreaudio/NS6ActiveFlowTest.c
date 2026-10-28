@@ -12,10 +12,14 @@ int main(void) {
 
     snapshot = ns6_active_flow_snapshot(&flow, 121, 20);
     assert(snapshot.frames == 0 && snapshot.client_id == 0);
+    assert(ns6_active_flow_should_rearm(snapshot, 512, 1024));
+    assert(!ns6_active_flow_should_rearm(snapshot, 2048, 1024));
+    assert(!ns6_active_flow_should_rearm(snapshot, 0, 1024));
 
     ns6_active_flow_record(&flow, 256, 87, 200);
     snapshot = ns6_active_flow_snapshot(&flow, 201, 20);
     assert(snapshot.frames == 256 && snapshot.client_id == 87);
+    assert(!ns6_active_flow_should_rearm(snapshot, 0, 1024));
 
     ns6_active_flow_clear(&flow);
     snapshot = ns6_active_flow_snapshot(&flow, 202, 20);

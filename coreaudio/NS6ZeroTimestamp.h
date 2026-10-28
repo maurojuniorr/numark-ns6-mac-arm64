@@ -6,6 +6,11 @@
    Keep this clock period independent from the application's I/O buffer size. */
 #define NS6_ZERO_TIMESTAMP_PERIOD 16384u
 
+static inline uint64_t ns6_zero_timestamp_keep_anchor(uint64_t anchor_host_time,
+                                                       uint64_t current_host_time) {
+    return anchor_host_time ? anchor_host_time : current_host_time;
+}
+
 typedef struct {
     uint64_t sample_time;
     uint64_t host_time;

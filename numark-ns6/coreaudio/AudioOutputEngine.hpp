@@ -19,8 +19,15 @@ public:
     std::uint64_t droppedMixFrames() const noexcept {
         return droppedMixFrames_.load(std::memory_order_relaxed);
     }
+    std::uint64_t mixCalls() const noexcept { return mixCalls_.load(std::memory_order_relaxed); }
+    std::uint64_t mixFrames() const noexcept { return mixFrames_.load(std::memory_order_relaxed); }
+    std::uint64_t takeMaxMixGapTicks() noexcept { return maxMixGapTicks_.exchange(0, std::memory_order_relaxed); }
 
 private:
     AudioOutputRing ring_;
     std::atomic<std::uint64_t> droppedMixFrames_{0};
+    std::atomic<std::uint64_t> mixCalls_{0};
+    std::atomic<std::uint64_t> mixFrames_{0};
+    std::atomic<std::uint64_t> lastMixTick_{0};
+    std::atomic<std::uint64_t> maxMixGapTicks_{0};
 };

@@ -2,6 +2,7 @@
 #define NS6_ACTIVE_FLOW_H
 
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 typedef struct {
@@ -14,6 +15,13 @@ typedef struct {
     unsigned frames;
     unsigned client_id;
 } NS6ActiveFlowSnapshot;
+
+static inline bool ns6_active_flow_should_rearm(NS6ActiveFlowSnapshot flow,
+                                                 unsigned queued_frames,
+                                                 unsigned minimum_queued_frames) {
+    return flow.frames == 0 && queued_frames > 0 &&
+           queued_frames < minimum_queued_frames;
+}
 
 static inline void ns6_active_flow_record(NS6ActiveFlow *flow, unsigned frames, unsigned client_id, uint64_t tick) {
     atomic_store_explicit(&flow->frames, frames, memory_order_relaxed);

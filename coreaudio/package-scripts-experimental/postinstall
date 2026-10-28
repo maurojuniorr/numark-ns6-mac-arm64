@@ -1,0 +1,38 @@
+#!/bin/zsh
+set -eu
+DAEMON="/Library/LaunchDaemons/io.github.maurojuniorr.numark-ns6-device-service.plist"
+PROBE="/Applications/Numark NS6 Status.app/Contents/Resources/ns6-service-probe"
+ROLLBACK="/Applications/Numark NS6 Status.app/Contents/Resources/rollback-persistent-service"
+LABEL='io.github.maurojuniorr.numark-ns6-device-service'
+MIDI_AGENT="/Library/LaunchAgents/io.github.maurojuniorr.numark-ns6-midi-bridge.plist"
+CONSOLE_UID=$(/usr/bin/stat -f '%u' /dev/console)
+if ! /bin/launchctl bootstrap system "$DAEMON" >/dev/null 2>&1 && \
+   ! /bin/launchctl kickstart -k "system/$LABEL" >/dev/null 2>&1; then
+    print -u2 'Could not start the NS6 device service; restoring the previous installation.'
+    /bin/zsh "$ROLLBACK"
+    exit 1
+fi
+
+READY=0
+for _ in {1..20}; do
+    if [[ -x "$PROBE" ]] && "$PROBE" >/dev/null 2>&1; then
+        READY=1
+        break
+    fi
+    /bin/sleep 0.25
+done
+if [[ "$READY" != "1" ]]; then
+    print -u2 'NS6 Mach service did not answer its protocol probe; restoring the previous installation.'
+    /bin/zsh "$ROLLBACK"
+    exit 1
+fi
+
+if [[ "$CONSOLE_UID" != "0" ]] && ! /bin/launchctl bootstrap "gui/$CONSOLE_UID" "$MIDI_AGENT" >/dev/null 2>&1; then
+    print -u2 'Could not start the user-session MIDI bridge; restoring the previous installation.'
+    /bin/zsh "$ROLLBACK"
+    exit 1
+fi
+
+/usr/bin/killall -m '^Core Audio Driver \(NumarkNS6M1\.driver\)$' >/dev/null 2>&1 || true
+/usr/bin/killall coreaudiod >/dev/null 2>&1 || true
+exit 0

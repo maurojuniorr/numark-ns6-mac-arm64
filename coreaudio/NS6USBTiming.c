@@ -66,3 +66,7 @@ bool ns6_usb_timing_take_snapshot(NS6USBTiming *timing,
 bool ns6_usb_timing_is_callback_gap(uint64_t interval_ns) {
     return interval_ns >= 20000000ULL;
 }
+
+bool ns6_usb_timing_is_slow_submit(uint64_t duration_ns) {
+    return duration_ns >= 5000000ULL;
+}

@@ -6,8 +6,8 @@
 #include <cstdint>
 #include <limits>
 
-static_assert(AudioInputReader::kSlotCount == 4,
-              "NS6 capture must keep four bulk-IN reads queued, matching the Ploytec path");
+static_assert(AudioInputReader::kSlotCount == 8,
+              "Diagnostic capture must keep eight bulk-IN reads queued");
 
 static void encodeLane(std::uint8_t* bytes, std::uint32_t sample) {
     for (unsigned bit = 0; bit < 24; ++bit)
